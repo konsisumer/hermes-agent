@@ -7899,9 +7899,10 @@ class HermesCLI:
         
         @kb.add('c-d')
         def handle_ctrl_d(event):
-            """Handle Ctrl+D - exit."""
-            self._should_exit = True
-            event.app.exit()
+            """Handle Ctrl+D - exit only when the input buffer is empty (standard EOF behavior)."""
+            if not event.app.current_buffer.text:
+                self._should_exit = True
+                event.app.exit()
 
         @kb.add('c-z')
         def handle_ctrl_z(event):
