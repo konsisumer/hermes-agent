@@ -100,6 +100,8 @@ def cron_list(show_all: bool = False):
             last_run = job.get("last_run_at", "?")
             if last_status == "ok":
                 status_display = color("ok", Colors.GREEN)
+            elif last_status == "delivery_failed":
+                status_display = color("delivery_failed", Colors.YELLOW)
             else:
                 status_display = color(f"{last_status}: {job.get('last_error', '?')}", Colors.RED)
             print(f"    Last run:  {last_run}  {status_display}")

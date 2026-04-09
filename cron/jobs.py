@@ -590,7 +590,12 @@ def mark_job_run(job_id: str, success: bool, error: Optional[str] = None,
         if job["id"] == job_id:
             now = _hermes_now().isoformat()
             job["last_run_at"] = now
-            job["last_status"] = "ok" if success else "error"
+            if not success:
+                job["last_status"] = "error"
+            elif delivery_error:
+                job["last_status"] = "delivery_failed"
+            else:
+                job["last_status"] = "ok"
             job["last_error"] = error if not success else None
             # Track delivery failures separately — cleared on successful delivery
             job["last_delivery_error"] = delivery_error
