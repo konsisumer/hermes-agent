@@ -47,6 +47,7 @@ def _attach_agent(
             context_length=context_length,
             compression_count=compressions,
         ),
+        get_rate_limit_state=lambda: None,
     )
     return cli_obj
 
