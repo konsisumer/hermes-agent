@@ -40,7 +40,7 @@ class TestSethomeWritesToEnv:
              patch.dict(os.environ, {}, clear=False):
             # Inline the import so the patched version is used
             import gateway.run as gw_mod
-            original = gw_mod.GatewayRunner._handle_sethome_command
+            original = gw_mod.GatewayRunner._handle_set_home_command
 
             # Call with the mock
             with patch("hermes_cli.config.save_env_value") as mock_save_env:
