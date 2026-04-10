@@ -55,6 +55,24 @@ def test_get_platform_tools_includes_enabled_mcp_servers_by_default():
     assert "disabled-server" not in enabled
 
 
+def test_get_platform_tools_coerces_numeric_mcp_server_names_to_str():
+    """YAML parses unquoted numeric keys (e.g. 12306) as int.  The toolset set
+    must contain only strings so that sorted() never raises TypeError."""
+    config = {
+        "mcp_servers": {
+            12306: {"command": "uvx", "args": ["mcp-server-12306"]},
+            "exa": {"url": "https://mcp.exa.ai/mcp"},
+        }
+    }
+
+    enabled = _get_platform_tools(config, "cli")
+
+    assert "12306" in enabled
+    assert isinstance(list(enabled)[0], str)  # every element is a string
+    # sorted() must not raise TypeError on the mixed-origin set
+    sorted(enabled)
+
+
 def test_get_platform_tools_keeps_enabled_mcp_servers_with_explicit_builtin_selection():
     config = {
         "platform_toolsets": {"cli": ["web", "memory"]},
