@@ -109,14 +109,12 @@ class TestMemoryManagerUserIdThreading:
         assert "user_id" not in p._init_kwargs
 
     def test_multiple_providers_all_receive_user_id(self):
-        from agent.builtin_memory_provider import BuiltinMemoryProvider
-
         mgr = MemoryManager()
-        # Use builtin + one external (MemoryManager only allows one external)
-        builtin = BuiltinMemoryProvider()
-        ext = RecordingProvider("external")
-        mgr.add_provider(builtin)
-        mgr.add_provider(ext)
+        # "builtin" slot + one external — MemoryManager allows at most one of each
+        p1 = RecordingProvider("builtin")
+        p2 = RecordingProvider("external")
+        mgr.add_provider(p1)
+        mgr.add_provider(p2)
 
         mgr.initialize_all(
             session_id="sess-multi",
@@ -124,8 +122,10 @@ class TestMemoryManagerUserIdThreading:
             user_id="slack_U12345",
         )
 
-        assert ext._init_kwargs.get("user_id") == "slack_U12345"
-        assert ext._init_kwargs.get("platform") == "slack"
+        assert p1._init_kwargs.get("user_id") == "slack_U12345"
+        assert p1._init_kwargs.get("platform") == "slack"
+        assert p2._init_kwargs.get("user_id") == "slack_U12345"
+        assert p2._init_kwargs.get("platform") == "slack"
 
 
 # ---------------------------------------------------------------------------
