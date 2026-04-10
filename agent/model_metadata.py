@@ -39,6 +39,7 @@ _PROVIDER_PREFIXES: frozenset[str] = frozenset({
     "arcee-ai", "arceeai",
     "xai", "x-ai", "x.ai", "grok",
     "qwen-portal",
+    "xai", "x-ai", "x.ai",
 })
 
 
