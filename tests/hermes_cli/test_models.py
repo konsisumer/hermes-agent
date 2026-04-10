@@ -7,6 +7,7 @@ from hermes_cli.models import (
     filter_nous_free_models, _NOUS_ALLOWED_FREE_MODELS,
     is_nous_free_tier, partition_nous_models_by_tier,
     check_nous_free_tier, _FREE_TIER_CACHE_TTL,
+    model_supports_fast_mode, _is_anthropic_fast_model,
 )
 import hermes_cli.models as _models_mod
 
@@ -397,3 +398,40 @@ class TestCheckNousFreeTierCache:
     def test_cache_ttl_is_short(self):
         """TTL should be short enough to catch upgrades quickly (<=5 min)."""
         assert _FREE_TIER_CACHE_TTL <= 300
+
+
+class TestModelSupportsFastMode:
+    """Tests for model_supports_fast_mode and _is_anthropic_fast_model."""
+
+    def test_bare_opus_id(self):
+        assert model_supports_fast_mode("claude-opus-4-6") is True
+
+    def test_date_suffixed_opus_id(self):
+        assert model_supports_fast_mode("claude-opus-4-6-20260401") is True
+
+    def test_vendor_prefixed_date_suffixed(self):
+        assert model_supports_fast_mode("anthropic/claude-opus-4-6-20260401") is True
+
+    def test_dot_variant(self):
+        assert model_supports_fast_mode("claude-opus-4.6") is True
+
+    def test_openrouter_variant_tag(self):
+        assert model_supports_fast_mode("claude-opus-4-6:beta") is True
+
+    def test_date_suffix_with_variant_tag(self):
+        assert model_supports_fast_mode("claude-opus-4-6-20260401:fast") is True
+
+    def test_non_fast_model(self):
+        assert model_supports_fast_mode("claude-sonnet-4-6") is False
+
+    def test_none_input(self):
+        assert model_supports_fast_mode(None) is False
+
+    def test_is_anthropic_fast_bare(self):
+        assert _is_anthropic_fast_model("claude-opus-4-6") is True
+
+    def test_is_anthropic_fast_date_suffixed(self):
+        assert _is_anthropic_fast_model("claude-opus-4-6-20260401") is True
+
+    def test_is_anthropic_fast_vendor_prefixed(self):
+        assert _is_anthropic_fast_model("anthropic/claude-opus-4-6-20260401") is True

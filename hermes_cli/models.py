@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import urllib.request
 import urllib.error
 from difflib import get_close_matches
@@ -1123,14 +1124,14 @@ def model_supports_fast_mode(model_id: Optional[str]) -> bool:
         return True
     # Anthropic fast mode — strip date suffixes (e.g. claude-opus-4-6-20260401)
     # and OpenRouter variant tags (:fast, :beta) for matching.
-    base = raw.split(":")[0]
+    base = re.sub(r"-\d{8}$", "", raw.split(":")[0])
     return base in _ANTHROPIC_FAST_MODE_MODELS
 
 
 def _is_anthropic_fast_model(model_id: Optional[str]) -> bool:
     """Return True if the model supports Anthropic's fast mode (speed='fast')."""
     raw = _strip_vendor_prefix(str(model_id or ""))
-    base = raw.split(":")[0]
+    base = re.sub(r"-\d{8}$", "", raw.split(":")[0])
     return base in _ANTHROPIC_FAST_MODE_MODELS
 
 
