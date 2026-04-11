@@ -382,6 +382,30 @@ class TestPlanSkillHelpers:
 
         assert path == Path(".hermes") / "plans" / "2026-03-15_093045-implement-oauth-login-refresh-tokens.md"
 
+    def test_build_plan_path_whitespace_only_returns_default_slug(self):
+        path = build_plan_path(
+            "   \n   ",
+            now=datetime(2026, 3, 15, 9, 30, 45),
+        )
+        assert path == Path(".hermes") / "plans" / "2026-03-15_093045-conversation-plan.md"
+
+    def test_build_plan_path_normal_string_slug_unchanged(self):
+        path = build_plan_path(
+            "Add dark mode toggle",
+            now=datetime(2026, 3, 15, 9, 30, 45),
+        )
+        assert path == Path(".hermes") / "plans" / "2026-03-15_093045-add-dark-mode-toggle.md"
+
+    def test_build_plan_path_empty_string_and_none_return_default_slug(self):
+        for instruction in ("", None):
+            path = build_plan_path(
+                instruction,
+                now=datetime(2026, 3, 15, 9, 30, 45),
+            )
+            assert path == Path(".hermes") / "plans" / "2026-03-15_093045-conversation-plan.md", (
+                f"Expected default slug for instruction={instruction!r}"
+            )
+
     def test_plan_skill_message_can_include_runtime_save_path_note(self, tmp_path):
         with patch("tools.skills_tool.SKILLS_DIR", tmp_path):
             _make_skill(
