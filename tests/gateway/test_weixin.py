@@ -85,6 +85,28 @@ class TestWeixinChunking:
 
         assert chunks == [content]
 
+    def test_split_text_does_not_pack_beyond_max_length(self):
+        adapter = _make_adapter()
+        adapter.MAX_MESSAGE_LENGTH = 10
+
+        content = adapter.format_message("第一行\n第二行\n第三行")
+        chunks = adapter._split_text(content)
+
+        assert len(chunks) > 1
+        assert all(len(c) <= adapter.MAX_MESSAGE_LENGTH for c in chunks)
+
+    def test_split_text_packs_many_lines_to_avoid_flooding(self):
+        adapter = _make_adapter()
+
+        lines = "\n".join(f"Line {i}" for i in range(20))
+        content = adapter.format_message(lines)
+        chunks = adapter._split_text(content)
+
+        assert len(chunks) < 20
+        combined = "\n\n".join(chunks)
+        for i in range(20):
+            assert f"Line {i}" in combined
+
     def test_split_text_keeps_complete_code_block_together_when_possible(self):
         adapter = _make_adapter()
         adapter.MAX_MESSAGE_LENGTH = 80
@@ -128,7 +150,7 @@ class TestWeixinChunking:
         content = adapter.format_message("第一行\n第二行\n第三行")
         chunks = adapter._split_text(content)
 
-        assert chunks == ["第一行", "第二行", "第三行"]
+        assert chunks == ["第一行\n\n第二行\n\n第三行"]
 
 
 class TestWeixinConfig:

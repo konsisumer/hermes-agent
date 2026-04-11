@@ -757,6 +757,29 @@ def _pack_markdown_blocks_for_weixin(content: str, max_length: int) -> List[str]
     return packed
 
 
+def _pack_units_for_weixin(units: List[str], max_length: int) -> List[str]:
+    """Re-pack fine-grained delivery units into fewer messages.
+
+    Adjacent units are merged (separated by double newlines) as long as the
+    combined text stays within *max_length*.  This prevents flooding the chat
+    with dozens of tiny messages when the upstream splitter produces one unit
+    per line.
+    """
+    if not units:
+        return []
+    packed: List[str] = []
+    current = units[0]
+    for unit in units[1:]:
+        merged = f"{current}\n\n{unit}"
+        if len(merged) <= max_length:
+            current = merged
+        else:
+            packed.append(current)
+            current = unit
+    packed.append(current)
+    return packed
+
+
 def _split_text_for_weixin_delivery(
     content: str, max_length: int, split_per_line: bool = False,
 ) -> List[str]:
@@ -769,23 +792,25 @@ def _split_text_for_weixin_delivery(
 
     *per_line* (``split_per_line=True``): Legacy behavior — top-level line
     breaks become separate chat messages; oversized units still use
-    block-aware packing.
+    block-aware packing.  Units are **re-packed** into as few messages as
+    possible to avoid flooding the chat (see #7565).
 
     The active mode is controlled via ``config.yaml`` ->
     ``platforms.weixin.extra.split_multiline_messages`` (``true`` / ``false``)
     or the env var ``WEIXIN_SPLIT_MULTILINE_MESSAGES``.
     """
     if split_per_line:
-        # Legacy: one message per top-level delivery unit.
+        # Legacy: split into delivery units, then re-pack adjacent small
+        # units to avoid flooding the chat with dozens of tiny messages.
         if len(content) <= max_length and "\n" not in content:
             return [content]
-        chunks: List[str] = []
+        units: List[str] = []
         for unit in _split_delivery_units_for_weixin(content):
             if len(unit) <= max_length:
-                chunks.append(unit)
+                units.append(unit)
                 continue
-            chunks.extend(_pack_markdown_blocks_for_weixin(unit, max_length))
-        return chunks or [content]
+            units.extend(_pack_markdown_blocks_for_weixin(unit, max_length))
+        return _pack_units_for_weixin(units, max_length) or [content]
 
     # Compact (default): single message when under the limit.
     if len(content) <= max_length:
