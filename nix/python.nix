@@ -49,7 +49,13 @@ let
       "alibabacloud-tea"
     ] (_: null));
 
-  pythonPackageOverrides = final: _prev:
+  pythonPackageOverrides = final: prev: {
+      # atomicwrites ships only an sdist and uses a legacy setup.py that
+      # requires setuptools at build time.
+      atomicwrites = prev.atomicwrites.overrideAttrs (old: {
+        nativeBuildInputs = (old.nativeBuildInputs or [ ]) ++ [ final.setuptools ];
+      });
+    } // (
     if isAarch64Darwin then {
       numpy = mkPrebuiltOverride final python312.pkgs.numpy { };
 
@@ -82,7 +88,7 @@ let
         tokenizers = [ ];
         tqdm = [ ];
       };
-    } else {};
+    } else {});
 
   pythonSet =
     (callPackage pyproject-nix.build.packages {
