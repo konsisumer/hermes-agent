@@ -240,6 +240,13 @@ def cronjob(
     del task_id  # unused but kept for handler signature compatibility
 
     try:
+        # Coerce repeat to int — LLMs may pass it as a string despite the
+        # schema declaring "type": "integer", which would crash the <= 0
+        # comparisons downstream (TypeError: '<=' not supported between
+        # instances of 'str' and 'int').
+        if repeat is not None:
+            repeat = int(repeat)
+
         normalized = (action or "").strip().lower()
 
         if normalized == "create":

@@ -231,3 +231,26 @@ class TestUnifiedCronjobTool:
         assert updated["success"] is True
         assert updated["job"]["skills"] == []
         assert updated["job"]["skill"] is None
+
+    def test_create_with_string_repeat_is_coerced_to_int(self):
+        """LLMs may pass repeat as a string despite the schema declaring integer."""
+        result = json.loads(
+            cronjob(
+                action="create",
+                prompt="Limited task",
+                schedule="every 1h",
+                repeat="3",
+            )
+        )
+        assert result["success"] is True
+        assert result["repeat"] == "3 times"
+
+    def test_update_with_string_repeat_is_coerced_to_int(self):
+        created = json.loads(
+            cronjob(action="create", prompt="Check", schedule="every 1h")
+        )
+        updated = json.loads(
+            cronjob(action="update", job_id=created["job_id"], repeat="5")
+        )
+        assert updated["success"] is True
+        assert updated["job"]["repeat"] == "5 times"
