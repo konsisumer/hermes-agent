@@ -223,6 +223,22 @@ class TestLoadGatewayConfig:
         assert config.unauthorized_dm_behavior == "ignore"
         assert config.platforms[Platform.WHATSAPP].extra["unauthorized_dm_behavior"] == "pair"
 
+    def test_bridges_reply_in_thread_from_slack_config(self, tmp_path, monkeypatch):
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "slack:\n"
+            "  reply_in_thread: false\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        config = load_gateway_config()
+
+        assert config.platforms[Platform.SLACK].extra["reply_in_thread"] is False
+
 
 class TestHomeChannelEnvOverrides:
     """Home channel env vars should apply even when the platform was already
