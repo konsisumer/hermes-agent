@@ -122,21 +122,29 @@ class TestStaleResponseSuppression:
         session_key = "telegram:user:789"
         event = _make_event("describe this", chat_id="789")
 
+        call_count = 0
+
         async def handler(ev):
-            # Photo burst queued (no interrupt set)
-            photo_event = MessageEvent(
-                text="",
-                message_type=MessageType.PHOTO,
-                source=MagicMock(
-                    chat_id="789",
-                    platform=Platform.TELEGRAM,
-                    thread_id=None,
-                ),
-                message_id="p1",
-            )
-            adapter._pending_messages[session_key] = photo_event
-            # interrupt_event is NOT set (photo bursts don't interrupt)
-            return "here is the description"
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                # Photo burst queued (no interrupt set)
+                photo_event = MessageEvent(
+                    text="",
+                    message_type=MessageType.PHOTO,
+                    source=MagicMock(
+                        chat_id="789",
+                        platform=Platform.TELEGRAM,
+                        thread_id=None,
+                        user_id="u1",
+                    ),
+                    message_id="p1",
+                )
+                adapter._pending_messages[session_key] = photo_event
+                # interrupt_event is NOT set (photo bursts don't interrupt)
+                return "here is the description"
+            # Recursive call for the queued photo — just return None
+            return None
 
         adapter.set_message_handler(handler)
         adapter._active_sessions[session_key] = asyncio.Event()
