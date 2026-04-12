@@ -79,6 +79,7 @@ class GatewayStreamConsumer:
         self._accumulated = ""
         self._message_id: Optional[str] = None
         self._already_sent = False
+        self._stream_content_sent = False
         self._edit_supported = True  # Disabled when progressive edits are no longer usable
         self._last_edit_time = 0.0
         self._last_sent_text = ""   # Track last-sent text to skip redundant edits
@@ -92,6 +93,11 @@ class GatewayStreamConsumer:
     def already_sent(self) -> bool:
         """True if at least one message was sent or edited during the run."""
         return self._already_sent
+
+    @property
+    def stream_content_sent(self) -> bool:
+        """True if streaming content (not just commentary) was sent."""
+        return self._stream_content_sent
 
     @property
     def final_response_sent(self) -> bool:
@@ -327,6 +333,7 @@ class GatewayStreamConsumer:
             if result.success and result.message_id:
                 self._message_id = str(result.message_id)
                 self._already_sent = True
+                self._stream_content_sent = True
                 self._last_sent_text = text
                 return str(result.message_id)
             else:
@@ -546,6 +553,7 @@ class GatewayStreamConsumer:
                         self._fallback_final_send = True
                         self._edit_supported = False
                         self._already_sent = True
+                        self._stream_content_sent = True
                         # Best-effort: strip the cursor from the last visible
                         # message so the user doesn't see a stuck ▉.
                         await self._try_strip_cursor()
@@ -567,6 +575,7 @@ class GatewayStreamConsumer:
                     else:
                         self._edit_supported = False
                     self._already_sent = True
+                    self._stream_content_sent = True
                     self._last_sent_text = text
                     if not result.message_id:
                         self._fallback_prefix = self._visible_prefix()
