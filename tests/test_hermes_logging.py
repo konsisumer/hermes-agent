@@ -35,6 +35,13 @@ def _reset_logging_state():
             h.close()
         else:
             pre_existing.append(h)
+    # Reset child logger levels that other test modules in the same xdist
+    # worker may have changed (e.g. cli.py sets "tools" to ERROR).  Without
+    # this, propagated records can be silently dropped.
+    _LOGGERS_TO_RESET = ("tools", "run_agent", "trajectory_compressor", "cron", "hermes_cli")
+    saved_levels = {name: logging.getLogger(name).level for name in _LOGGERS_TO_RESET}
+    for name in _LOGGERS_TO_RESET:
+        logging.getLogger(name).setLevel(logging.NOTSET)
     # Ensure the record factory is installed (it's idempotent).
     hermes_logging._install_session_record_factory()
     yield
@@ -43,6 +50,8 @@ def _reset_logging_state():
         if h not in pre_existing:
             root.removeHandler(h)
             h.close()
+    for name, lvl in saved_levels.items():
+        logging.getLogger(name).setLevel(lvl)
     hermes_logging._logging_initialized = False
     hermes_logging.clear_session_context()
 
