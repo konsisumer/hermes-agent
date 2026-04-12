@@ -1619,7 +1619,25 @@ class BasePlatformAdapter(ABC):
 
             # Call the handler (this can take a while with tool calls)
             response = await self._message_handler(event)
-            
+
+            # Suppress stale responses from interrupted sessions.  If a new
+            # message arrived while the handler was running (or during
+            # post-processing) AND the handler did not consume it, the
+            # response we hold is for the OLD turn.  Sending it would cause
+            # the user to see a duplicate/stale reply followed by the real
+            # reply for the newer message.  (#8221)
+            if (
+                response
+                and interrupt_event.is_set()
+                and session_key in self._pending_messages
+            ):
+                logger.info(
+                    "[%s] Suppressing stale response for interrupted session %s",
+                    self.name,
+                    session_key,
+                )
+                response = None
+
             # Send response if any.  A None/empty response is normal when
             # streaming already delivered the text (already_sent=True) or
             # when the message was queued behind an active agent.  Log at
