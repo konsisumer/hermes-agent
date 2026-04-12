@@ -2344,13 +2344,11 @@ def _model_flow_kimi(config, current_model=""):
     """Kimi / Moonshot model selection with automatic endpoint routing.
 
     - sk-kimi-* keys   → api.kimi.com/coding/v1  (Kimi Coding Plan)
-    - Other keys        → api.moonshot.ai/v1      (legacy Moonshot)
-
-    No manual base URL prompt — endpoint is determined by key prefix.
+    - Other keys        → prompt for moonshot.ai (global) or moonshot.cn (China)
     """
     from hermes_cli.auth import (
-        PROVIDER_REGISTRY, KIMI_CODE_BASE_URL, _prompt_model_selection,
-        _save_model_choice, deactivate_provider,
+        PROVIDER_REGISTRY, KIMI_CODE_BASE_URL, MOONSHOT_CN_BASE_URL,
+        _prompt_model_selection, _save_model_choice, deactivate_provider,
     )
     from hermes_cli.config import get_env_value, save_env_value, load_config, save_config
 
@@ -2386,17 +2384,27 @@ def _model_flow_kimi(config, current_model=""):
         print(f"  {pconfig.name} API key: {existing_key[:8]}... ✓")
         print()
 
-    # Step 2: Auto-detect endpoint from key prefix
+    # Step 2: Auto-detect endpoint from key prefix, or prompt for platform
     is_coding_plan = existing_key.startswith("sk-kimi-")
     if is_coding_plan:
         effective_base = KIMI_CODE_BASE_URL
         print(f"  Detected Kimi Coding Plan key → {effective_base}")
+        if base_url_env and get_env_value(base_url_env):
+            save_env_value(base_url_env, "")
     else:
-        effective_base = pconfig.inference_base_url
-        print(f"  Using Moonshot endpoint → {effective_base}")
-    # Clear any manual base URL override so auto-detection works at runtime
-    if base_url_env and get_env_value(base_url_env):
-        save_env_value(base_url_env, "")
+        platform_choices = [
+            "moonshot.ai  (global — api.moonshot.ai)",
+            "moonshot.cn  (China  — api.moonshot.cn)",
+        ]
+        print("  Which Moonshot platform was this key created on?")
+        platform_idx = _prompt_provider_choice(platform_choices, default=0)
+        if platform_idx == 1:
+            effective_base = MOONSHOT_CN_BASE_URL
+        else:
+            effective_base = pconfig.inference_base_url
+        print(f"  Using endpoint → {effective_base}")
+        if base_url_env:
+            save_env_value(base_url_env, effective_base)
     print()
 
     # Step 3: Model selection — show appropriate models for the endpoint

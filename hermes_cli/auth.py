@@ -292,6 +292,7 @@ def get_anthropic_key() -> str:
 # api.moonshot.ai/v1 (the default).  Auto-detect when user hasn't set
 # KIMI_BASE_URL explicitly.
 KIMI_CODE_BASE_URL = "https://api.kimi.com/coding/v1"
+MOONSHOT_CN_BASE_URL = "https://api.moonshot.cn/v1"
 
 
 def _resolve_kimi_base_url(api_key: str, default_url: str, env_override: str) -> str:

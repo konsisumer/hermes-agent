@@ -23,6 +23,7 @@ from hermes_cli.auth import (
     get_auth_status,
     AuthError,
     KIMI_CODE_BASE_URL,
+    MOONSHOT_CN_BASE_URL,
     _try_gh_cli_token,
     _resolve_kimi_base_url,
 )
@@ -860,6 +861,30 @@ class TestKimiCodeCredentialAutoDetect:
         monkeypatch.setattr("hermes_cli.auth.detect_zai_endpoint", lambda *a, **kw: None)
         creds = resolve_api_key_provider_credentials("zai")
         assert creds["base_url"] == "https://api.z.ai/api/paas/v4"
+
+
+class TestMoonshotCnEndpoint:
+    """Test that moonshot.cn endpoint is accessible via KIMI_BASE_URL override."""
+
+    def test_cn_url_exported(self):
+        assert MOONSHOT_CN_BASE_URL == "https://api.moonshot.cn/v1"
+
+    def test_cn_override_resolves_correctly(self, monkeypatch):
+        monkeypatch.setenv("KIMI_API_KEY", "sk-cn-test-key")
+        monkeypatch.setenv("KIMI_BASE_URL", MOONSHOT_CN_BASE_URL)
+        creds = resolve_api_key_provider_credentials("kimi-coding")
+        assert creds["base_url"] == MOONSHOT_CN_BASE_URL
+
+    def test_cn_override_status(self, monkeypatch):
+        monkeypatch.setenv("KIMI_API_KEY", "sk-cn-test-key")
+        monkeypatch.setenv("KIMI_BASE_URL", MOONSHOT_CN_BASE_URL)
+        status = get_api_key_provider_status("kimi-coding")
+        assert status["configured"] is True
+        assert status["base_url"] == MOONSHOT_CN_BASE_URL
+
+    def test_resolve_kimi_base_url_with_cn_override(self):
+        url = _resolve_kimi_base_url("sk-cn-key", MOONSHOT_DEFAULT_URL, MOONSHOT_CN_BASE_URL)
+        assert url == MOONSHOT_CN_BASE_URL
 
 
 class TestZaiEndpointAutoDetect:
