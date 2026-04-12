@@ -981,6 +981,11 @@ class AIAgent:
                     }
                 elif "portal.qwen.ai" in effective_base.lower():
                     client_kwargs["default_headers"] = _qwen_portal_headers()
+                elif "generativelanguage.googleapis.com" in effective_base.lower():
+                    client_kwargs["api_key"] = ""
+                    client_kwargs["default_headers"] = {
+                        "x-goog-api-key": api_key,
+                    }
             else:
                 # No explicit creds — use the centralized provider router
                 from agent.auxiliary_client import resolve_provider_client

@@ -211,6 +211,23 @@ class TestGeminiAgentInit:
             assert agent.api_mode == "chat_completions"
             assert agent.provider == "gemini"
 
+    def test_gemini_uses_x_goog_api_key_header(self, monkeypatch):
+        """Gemini endpoint uses x-goog-api-key header instead of Bearer token (#7893)."""
+        monkeypatch.setenv("GOOGLE_API_KEY", "AIzaSy-test-key")
+        with patch("run_agent.OpenAI") as mock_openai:
+            mock_openai.return_value = MagicMock()
+            from run_agent import AIAgent
+            AIAgent(
+                model="gemini-2.5-flash",
+                provider="gemini",
+                api_key="AIzaSy-test-key",
+                base_url="https://generativelanguage.googleapis.com/v1beta/openai",
+            )
+            call_kwargs = mock_openai.call_args.kwargs
+            assert call_kwargs["api_key"] == ""
+            assert call_kwargs["default_headers"]["x-goog-api-key"] == "AIzaSy-test-key"
+            assert "Authorization" not in call_kwargs.get("default_headers", {})
+
 
 # ── models.dev Integration ──
 

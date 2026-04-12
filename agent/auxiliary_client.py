@@ -1593,6 +1593,9 @@ def resolve_provider_client(
             from hermes_cli.models import copilot_default_headers
 
             headers.update(copilot_default_headers())
+        elif "generativelanguage.googleapis.com" in base_url.lower():
+            headers["x-goog-api-key"] = api_key
+            api_key = ""
 
         client = OpenAI(api_key=api_key, base_url=base_url,
                         **({"default_headers": headers} if headers else {}))
