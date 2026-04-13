@@ -73,6 +73,34 @@ def _scan_context_content(content: str, filename: str) -> str:
     return content
 
 
+_SKILL_DESC_MAX_LEN = 200
+
+
+def _scan_skill_description(desc: str, source: str) -> str:
+    """Scan a skill/category description for prompt injection.
+
+    Returns the original string if clean, or an empty string if blocked.
+    Enforces a length cap to limit injection surface.
+    """
+    if not desc:
+        return desc
+
+    for char in _CONTEXT_INVISIBLE_CHARS:
+        if char in desc:
+            logger.warning("Skill description %s blocked: invisible unicode", source)
+            return ""
+
+    for pattern, pid in _CONTEXT_THREAT_PATTERNS:
+        if re.search(pattern, desc, re.IGNORECASE):
+            logger.warning("Skill description %s blocked: %s", source, pid)
+            return ""
+
+    if len(desc) > _SKILL_DESC_MAX_LEN:
+        desc = desc[:_SKILL_DESC_MAX_LEN - 3] + "..."
+
+    return desc
+
+
 def _find_git_root(start: Path) -> Optional[Path]:
     """Walk *start* and its parents looking for a ``.git`` directory.
 
@@ -541,7 +569,9 @@ def _parse_skill_file(skill_file: Path) -> tuple[bool, dict, str]:
         if not skill_matches_platform(frontmatter):
             return False, frontmatter, ""
 
-        return True, frontmatter, extract_skill_description(frontmatter)
+        desc = extract_skill_description(frontmatter)
+        desc = _scan_skill_description(desc, str(skill_file))
+        return True, frontmatter, desc
     except Exception as e:
         logger.warning("Failed to parse skill file %s: %s", skill_file, e)
         return True, {}, ""
@@ -651,13 +681,17 @@ def build_skills_system_prompt(
                 available_toolsets,
             ):
                 continue
-            skills_by_category.setdefault(category, []).append(
-                (skill_name, entry.get("description", ""))
+            desc = _scan_skill_description(
+                entry.get("description", ""), f"snapshot:{skill_name}",
             )
-        category_descriptions = {
-            str(k): str(v)
-            for k, v in (snapshot.get("category_descriptions") or {}).items()
-        }
+            skills_by_category.setdefault(category, []).append(
+                (skill_name, desc)
+            )
+        category_descriptions = {}
+        for k, v in (snapshot.get("category_descriptions") or {}).items():
+            sanitized = _scan_skill_description(str(v), f"snapshot-category:{k}")
+            if sanitized:
+                category_descriptions[str(k)] = sanitized
     else:
         # Cold path: full filesystem scan + write snapshot for next time
         skill_entries: list[dict] = []
@@ -690,7 +724,11 @@ def build_skills_system_prompt(
                     continue
                 rel = desc_file.relative_to(skills_dir)
                 cat = "/".join(rel.parts[:-1]) if len(rel.parts) > 1 else "general"
-                category_descriptions[cat] = str(cat_desc).strip().strip("'\"")
+                sanitized = _scan_skill_description(
+                    str(cat_desc).strip().strip("'\""), str(desc_file),
+                )
+                if sanitized:
+                    category_descriptions[cat] = sanitized
             except Exception as e:
                 logger.debug("Could not read skill description %s: %s", desc_file, e)
 
@@ -747,7 +785,11 @@ def build_skills_system_prompt(
                     continue
                 rel = desc_file.relative_to(ext_dir)
                 cat = "/".join(rel.parts[:-1]) if len(rel.parts) > 1 else "general"
-                category_descriptions.setdefault(cat, str(cat_desc).strip().strip("'\""))
+                sanitized = _scan_skill_description(
+                    str(cat_desc).strip().strip("'\""), str(desc_file),
+                )
+                if sanitized:
+                    category_descriptions.setdefault(cat, sanitized)
             except Exception as e:
                 logger.debug("Could not read external skill description %s: %s", desc_file, e)
 
