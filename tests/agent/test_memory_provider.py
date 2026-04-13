@@ -395,6 +395,60 @@ class TestPluginMemoryDiscovery:
         from plugins.memory import load_memory_provider
         assert load_memory_provider("nonexistent_provider") is None
 
+    def test_discover_scans_user_dir(self, tmp_path):
+        """discover_memory_providers finds providers in HERMES_HOME/plugins/memory/."""
+        from plugins.memory import discover_memory_providers
+        from unittest.mock import patch
+
+        user_mem_dir = tmp_path / "plugins" / "memory" / "fakeprov"
+        user_mem_dir.mkdir(parents=True)
+        (user_mem_dir / "__init__.py").write_text(
+            "class FakeProvider:\n"
+            "    name = 'fakeprov'\n"
+            "    def is_available(self): return True\n"
+        )
+        with patch("plugins.memory._get_user_memory_dir", return_value=tmp_path / "plugins" / "memory"):
+            providers = discover_memory_providers()
+        names = [n for n, _, _ in providers]
+        assert "fakeprov" in names
+
+    def test_bundled_takes_precedence_over_user(self, tmp_path):
+        """Bundled providers shadow user providers with the same name."""
+        from plugins.memory import discover_memory_providers
+        from unittest.mock import patch
+
+        user_mem_dir = tmp_path / "plugins" / "memory" / "holographic"
+        user_mem_dir.mkdir(parents=True)
+        (user_mem_dir / "__init__.py").write_text("raise RuntimeError('should not be loaded')\n")
+        with patch("plugins.memory._get_user_memory_dir", return_value=tmp_path / "plugins" / "memory"):
+            providers = discover_memory_providers()
+        holo = [(n, d, a) for n, d, a in providers if n == "holographic"]
+        assert len(holo) == 1
+
+    def test_load_from_user_dir(self, tmp_path):
+        """load_memory_provider finds providers in user directory."""
+        from plugins.memory import load_memory_provider
+        from unittest.mock import patch
+
+        user_mem_dir = tmp_path / "plugins" / "memory" / "testmem"
+        user_mem_dir.mkdir(parents=True)
+        (user_mem_dir / "__init__.py").write_text(
+            "from agent.memory_provider import MemoryProvider\n"
+            "class TestMemProvider(MemoryProvider):\n"
+            "    name = 'testmem'\n"
+            "    def is_available(self): return True\n"
+            "    def initialize(self, *a, **kw): pass\n"
+            "    def system_prompt_block(self): return ''\n"
+            "    def get_tool_schemas(self): return []\n"
+            "    def handle_tool_call(self, *a, **kw): return {}\n"
+        )
+        with patch("plugins.memory._get_user_memory_dir", return_value=tmp_path / "plugins" / "memory"):
+            with patch("plugins.memory._find_provider_dir") as mock_find:
+                mock_find.return_value = user_mem_dir
+                p = load_memory_provider("testmem")
+        assert p is not None
+        assert p.name == "testmem"
+
 
 # ---------------------------------------------------------------------------
 # Sequential dispatch routing tests

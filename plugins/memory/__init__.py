@@ -1,12 +1,13 @@
 """Memory provider plugin discovery.
 
-Scans ``plugins/memory/<name>/`` directories for memory provider plugins.
-Each subdirectory must contain ``__init__.py`` with a class implementing
-the MemoryProvider ABC.
+Scans both bundled ``plugins/memory/<name>/`` and user-installed
+``$HERMES_HOME/plugins/memory/<name>/`` directories for memory provider
+plugins.  Each subdirectory must contain ``__init__.py`` with a class
+implementing the MemoryProvider ABC.
 
-Memory providers are separate from the general plugin system — they live
-in the repo and are always available without user installation. Only ONE
-can be active at a time, selected via ``memory.provider`` in config.yaml.
+Only ONE provider can be active at a time, selected via
+``memory.provider`` in config.yaml.  Bundled providers take precedence
+over user-installed providers on name collisions.
 
 Usage:
     from plugins.memory import discover_memory_providers, load_memory_provider
@@ -29,25 +30,25 @@ logger = logging.getLogger(__name__)
 _MEMORY_PLUGINS_DIR = Path(__file__).parent
 
 
-def discover_memory_providers() -> List[Tuple[str, str, bool]]:
-    """Scan plugins/memory/ for available providers.
+def _get_user_memory_dir() -> Path:
+    """Return the user memory-plugins directory under HERMES_HOME."""
+    from hermes_constants import get_hermes_home
+    return get_hermes_home() / "plugins" / "memory"
 
-    Returns list of (name, description, is_available) tuples.
-    Does NOT import the providers — just reads plugin.yaml for metadata
-    and does a lightweight availability check.
-    """
+
+def _scan_provider_dir(search_dir: Path) -> List[Tuple[str, str, bool]]:
+    """Scan a single directory for memory provider subdirectories."""
     results = []
-    if not _MEMORY_PLUGINS_DIR.is_dir():
+    if not search_dir.is_dir():
         return results
 
-    for child in sorted(_MEMORY_PLUGINS_DIR.iterdir()):
+    for child in sorted(search_dir.iterdir()):
         if not child.is_dir() or child.name.startswith(("_", ".")):
             continue
         init_file = child / "__init__.py"
         if not init_file.exists():
             continue
 
-        # Read description from plugin.yaml if available
         desc = ""
         yaml_file = child / "plugin.yaml"
         if yaml_file.exists():
@@ -59,7 +60,6 @@ def discover_memory_providers() -> List[Tuple[str, str, bool]]:
             except Exception:
                 pass
 
-        # Quick availability check — try loading and calling is_available()
         available = True
         try:
             provider = _load_provider_from_dir(child)
@@ -75,14 +75,48 @@ def discover_memory_providers() -> List[Tuple[str, str, bool]]:
     return results
 
 
+def discover_memory_providers() -> List[Tuple[str, str, bool]]:
+    """Scan bundled and user plugin directories for available providers.
+
+    Returns list of (name, description, is_available) tuples.
+    Bundled providers take precedence over user providers on name
+    collisions.
+    """
+    results = _scan_provider_dir(_MEMORY_PLUGINS_DIR)
+    seen = {name for name, _, _ in results}
+
+    for name, desc, avail in _scan_provider_dir(_get_user_memory_dir()):
+        if name not in seen:
+            results.append((name, desc, avail))
+            seen.add(name)
+
+    return results
+
+
+def _find_provider_dir(name: str) -> Optional[Path]:
+    """Locate a provider directory by name, checking bundled first."""
+    bundled = _MEMORY_PLUGINS_DIR / name
+    if bundled.is_dir():
+        return bundled
+    user_dir = _get_user_memory_dir() / name
+    if user_dir.is_dir():
+        return user_dir
+    return None
+
+
 def load_memory_provider(name: str) -> Optional["MemoryProvider"]:
     """Load and return a MemoryProvider instance by name.
 
-    Returns None if the provider is not found or fails to load.
+    Checks the bundled plugins/memory/ directory first, then
+    $HERMES_HOME/plugins/memory/.  Returns None if the provider is
+    not found or fails to load.
     """
-    provider_dir = _MEMORY_PLUGINS_DIR / name
-    if not provider_dir.is_dir():
-        logger.debug("Memory provider '%s' not found in %s", name, _MEMORY_PLUGINS_DIR)
+    provider_dir = _find_provider_dir(name)
+    if not provider_dir:
+        logger.debug(
+            "Memory provider '%s' not found in %s or %s",
+            name, _MEMORY_PLUGINS_DIR, _get_user_memory_dir(),
+        )
         return None
 
     try:
@@ -104,7 +138,8 @@ def _load_provider_from_dir(provider_dir: Path) -> Optional["MemoryProvider"]:
     - A top-level class that extends MemoryProvider — we instantiate it
     """
     name = provider_dir.name
-    module_name = f"plugins.memory.{name}"
+    is_bundled = _MEMORY_PLUGINS_DIR in provider_dir.parents or provider_dir.parent == _MEMORY_PLUGINS_DIR
+    module_name = f"plugins.memory.{name}" if is_bundled else f"_hermes_user_memory.{name}"
     init_file = provider_dir / "__init__.py"
 
     if not init_file.exists():
@@ -114,26 +149,39 @@ def _load_provider_from_dir(provider_dir: Path) -> Optional["MemoryProvider"]:
     if module_name in sys.modules:
         mod = sys.modules[module_name]
     else:
-        # Handle relative imports within the plugin
-        # First ensure the parent packages are registered
-        for parent in ("plugins", "plugins.memory"):
-            if parent not in sys.modules:
-                parent_path = Path(__file__).parent
-                if parent == "plugins":
-                    parent_path = parent_path.parent
-                parent_init = parent_path / "__init__.py"
-                if parent_init.exists():
-                    spec = importlib.util.spec_from_file_location(
-                        parent, str(parent_init),
-                        submodule_search_locations=[str(parent_path)]
-                    )
-                    if spec:
-                        parent_mod = importlib.util.module_from_spec(spec)
-                        sys.modules[parent] = parent_mod
-                        try:
-                            spec.loader.exec_module(parent_mod)
-                        except Exception:
-                            pass
+        if is_bundled:
+            # Handle relative imports within the plugin
+            # First ensure the parent packages are registered
+            for parent in ("plugins", "plugins.memory"):
+                if parent not in sys.modules:
+                    parent_path = Path(__file__).parent
+                    if parent == "plugins":
+                        parent_path = parent_path.parent
+                    parent_init = parent_path / "__init__.py"
+                    if parent_init.exists():
+                        spec = importlib.util.spec_from_file_location(
+                            parent, str(parent_init),
+                            submodule_search_locations=[str(parent_path)]
+                        )
+                        if spec:
+                            parent_mod = importlib.util.module_from_spec(spec)
+                            sys.modules[parent] = parent_mod
+                            try:
+                                spec.loader.exec_module(parent_mod)
+                            except Exception:
+                                pass
+        else:
+            # Register synthetic parent packages for user plugins
+            parent_pkg = "_hermes_user_memory"
+            if parent_pkg not in sys.modules:
+                parent_dir = provider_dir.parent
+                pkg_spec = importlib.util.spec_from_file_location(
+                    parent_pkg, None,
+                    submodule_search_locations=[str(parent_dir)]
+                )
+                if pkg_spec:
+                    parent_mod = importlib.util.module_from_spec(pkg_spec)
+                    sys.modules[parent_pkg] = parent_mod
 
         # Now load the provider module
         spec = importlib.util.spec_from_file_location(
@@ -249,23 +297,21 @@ def discover_plugin_cli_commands() -> List[dict]:
     any provider is loaded.
     """
     results: List[dict] = []
-    if not _MEMORY_PLUGINS_DIR.is_dir():
-        return results
 
     active_provider = _get_active_memory_provider()
     if not active_provider:
         return results
 
-    # Only look at the active provider's directory
-    plugin_dir = _MEMORY_PLUGINS_DIR / active_provider
-    if not plugin_dir.is_dir():
+    plugin_dir = _find_provider_dir(active_provider)
+    if not plugin_dir:
         return results
 
     cli_file = plugin_dir / "cli.py"
     if not cli_file.exists():
         return results
 
-    module_name = f"plugins.memory.{active_provider}.cli"
+    is_bundled = _MEMORY_PLUGINS_DIR in plugin_dir.parents or plugin_dir.parent == _MEMORY_PLUGINS_DIR
+    module_name = f"plugins.memory.{active_provider}.cli" if is_bundled else f"_hermes_user_memory.{active_provider}.cli"
     try:
         # Import the CLI module (lightweight — no SDK needed)
         if module_name in sys.modules:
