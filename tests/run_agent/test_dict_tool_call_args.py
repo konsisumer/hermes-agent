@@ -20,13 +20,14 @@ def _response_with_tool_call(arguments):
     return SimpleNamespace(choices=[choice], usage=None)
 
 
-class _FakeChatCompletions:
-    def __init__(self):
-        self.calls = 0
+_shared_call_count = 0
 
+
+class _FakeChatCompletions:
     def create(self, **kwargs):
-        self.calls += 1
-        if self.calls == 1:
+        global _shared_call_count
+        _shared_call_count += 1
+        if _shared_call_count == 1:
             return _response_with_tool_call({"path": "README.md"})
         return SimpleNamespace(
             choices=[
@@ -45,6 +46,9 @@ class _FakeClient:
 
 
 def test_tool_call_validation_accepts_dict_arguments(monkeypatch):
+    global _shared_call_count
+    _shared_call_count = 0
+
     from run_agent import AIAgent
 
     monkeypatch.setattr("run_agent.OpenAI", lambda **kwargs: _FakeClient())
