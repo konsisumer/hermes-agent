@@ -35,6 +35,10 @@ def _reset_logging_state():
             h.close()
         else:
             pre_existing.append(h)
+    # Reset logger levels that other tests (or AIAgent quiet_mode) may have
+    # raised to ERROR in the same xdist worker process.
+    for name in ("tools", "run_agent", "trajectory_compressor", "cron", "hermes_cli"):
+        logging.getLogger(name).setLevel(logging.NOTSET)
     # Ensure the record factory is installed (it's idempotent).
     hermes_logging._install_session_record_factory()
     yield
