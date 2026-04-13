@@ -37,16 +37,42 @@ from cron.jobs import (
 # ---------------------------------------------------------------------------
 
 _CRON_THREAT_PATTERNS = [
+    # -- Prompt injection / override --
     (r'ignore\s+(?:\w+\s+)*(?:previous|all|above|prior)\s+(?:\w+\s+)*instructions', "prompt_injection"),
     (r'do\s+not\s+tell\s+the\s+user', "deception_hide"),
     (r'system\s+prompt\s+override', "sys_prompt_override"),
     (r'disregard\s+(your|all|any)\s+(instructions|rules|guidelines)', "disregard_rules"),
+    # -- Literal command exfiltration --
     (r'curl\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)', "exfil_curl"),
     (r'wget\s+[^\n]*\$\{?\w*(KEY|TOKEN|SECRET|PASSWORD|CREDENTIAL|API)', "exfil_wget"),
     (r'cat\s+[^\n]*(\.env|credentials|\.netrc|\.pgpass)', "read_secrets"),
     (r'authorized_keys', "ssh_backdoor"),
     (r'/etc/sudoers|visudo', "sudoers_mod"),
     (r'rm\s+-rf\s+/', "destructive_root_rm"),
+    # -- Natural-language secret/credential file access --
+    (r'(?:read|open|show|display|view|contents?\s+of|extract|dump|print)\s+[^\n]{0,60}[\\/~]?\.env\b', "nl_read_secrets"),
+    (r'(?:read|open|show|display|view|contents?\s+of|extract|dump|print)\s+[^\n]{0,60}[\\/~]?\.(pem|key|credentials|netrc|pgpass)\b', "nl_read_secrets"),
+    (r'(?:read|open|show|display|view|contents?\s+of|extract|dump|print)\s+[^\n]{0,60}(?:api[_\s]?key|secret|token|password|credential)', "nl_read_secrets"),
+    # -- Natural-language data exfiltration --
+    (r'(?:post|send|upload|transmit|exfiltrate|forward)\s+[^\n]{0,80}(?:https?://|webhook|endpoint)', "nl_exfil"),
+    (r'(?:https?://)[^\s]{5,}[^\n]{0,40}(?:api[_\s]?key|secret|token|\.env|credential|password)', "nl_exfil"),
+    # -- SSRF / cloud metadata --
+    (r'169\.254\.169\.254', "ssrf_metadata"),
+    (r'metadata\.google\.internal', "ssrf_metadata"),
+    (r'100\.100\.100\.200', "ssrf_metadata"),
+    # -- Network reconnaissance --
+    (r'(?:scan|probe|enumerate)\s+[^\n]{0,40}(?:port|network|subnet|host|range|0/\d)', "net_recon"),
+    (r'(?:nmap|masscan|zmap)\b', "net_recon"),
+    # -- Reverse shell (expanded) --
+    (r'(?:nc|ncat|netcat)\s+-[lep]', "reverse_shell"),
+    (r'python\d?\s+-c\s+.*socket', "reverse_shell"),
+    (r'(?:bash|sh|zsh)\s+-i\s+[^\n]*(?:/dev/tcp|/dev/udp)', "reverse_shell"),
+    (r'mkfifo\s+[^\n]*/tmp/', "reverse_shell"),
+    # -- Privilege escalation (expanded) --
+    (r'chmod\s+[0-7]*[67][0-7]{2}\s+/', "priv_escalation"),
+    (r'(?:chown|chgrp)\s+root\b', "priv_escalation"),
+    (r'(?:fork\s*bomb|:\(\)\s*\{)', "destructive_cmd"),
+    (r'dd\s+if=/dev/zero\s+of=/', "destructive_cmd"),
 ]
 
 _CRON_INVISIBLE_CHARS = {

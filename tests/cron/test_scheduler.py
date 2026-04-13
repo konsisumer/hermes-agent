@@ -912,7 +912,9 @@ class TestRunJobSkillBacked:
         assert final_response == "ok"
 
         kwargs = mock_agent_cls.call_args.kwargs
-        assert "cronjob" in (kwargs["disabled_toolsets"] or [])
+        disabled = kwargs["disabled_toolsets"] or []
+        for ts in ["cronjob", "terminal", "code_execution", "delegation", "skills"]:
+            assert ts in disabled, f"{ts} must be disabled for cron jobs"
 
         prompt_arg = mock_agent.run_conversation.call_args.args[0]
         assert "blogwatcher" in prompt_arg
