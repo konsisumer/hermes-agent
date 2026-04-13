@@ -788,6 +788,22 @@ def list_authenticated_providers(
     results: List[dict] = []
     seen_slugs: set = set()
 
+    from hermes_cli.copilot_auth import validate_copilot_token
+
+    def _env_has_valid_creds(provider_slug: str, env_vars) -> bool:
+        """Check if any env var contains a credential that passes format validation."""
+        for ev in env_vars:
+            val = os.environ.get(ev)
+            if not val:
+                continue
+            if provider_slug in ("copilot", "github-copilot"):
+                valid, _ = validate_copilot_token(val)
+                if not valid:
+                    logger.debug("Skipping %s: token in %s has invalid format", provider_slug, ev)
+                    continue
+            return True
+        return False
+
     data = fetch_models_dev()
 
     # Build curated model lists keyed by hermes provider ID
@@ -814,8 +830,8 @@ def list_authenticated_providers(
             if not isinstance(env_vars, list):
                 continue
 
-        # Check if any env var is set
-        has_creds = any(os.environ.get(ev) for ev in env_vars)
+        # Check if any env var is set with a valid token format
+        has_creds = _env_has_valid_creds(hermes_id, env_vars)
         if not has_creds:
             continue
 
@@ -857,16 +873,16 @@ def list_authenticated_providers(
         if hermes_slug in seen_slugs:
             continue
 
-        # Check if credentials exist
+        # Check if credentials exist with valid token format
         has_creds = False
         if overlay.extra_env_vars:
-            has_creds = any(os.environ.get(ev) for ev in overlay.extra_env_vars)
+            has_creds = _env_has_valid_creds(hermes_slug, overlay.extra_env_vars)
         # Also check api_key_env_vars from PROVIDER_REGISTRY for api_key auth_type
         if not has_creds and overlay.auth_type == "api_key":
             for _key in (pid, hermes_slug):
                 pcfg = _auth_registry.get(_key)
                 if pcfg and pcfg.api_key_env_vars:
-                    if any(os.environ.get(ev) for ev in pcfg.api_key_env_vars):
+                    if _env_has_valid_creds(hermes_slug, pcfg.api_key_env_vars):
                         has_creds = True
                         break
         # Check auth store and credential pool for non-env-var credentials.
