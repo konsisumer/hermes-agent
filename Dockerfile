@@ -35,7 +35,7 @@ RUN npm install --prefer-offline --no-audit && \
 RUN chown -R hermes:hermes /opt/hermes
 USER hermes
 
-RUN uv venv && \
+RUN uv venv --clear && \
     uv pip install --no-cache-dir -e ".[all]"
 
 USER root
