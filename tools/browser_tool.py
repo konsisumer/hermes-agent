@@ -1702,8 +1702,58 @@ def browser_console(clear: bool = False, expression: Optional[str] = None, task_
     }, ensure_ascii=False)
 
 
+_DANGEROUS_JS_PATTERNS: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\bdocument\s*\.\s*cookie\b", re.IGNORECASE),
+     "Accessing document.cookie is blocked for security"),
+    (re.compile(r"\blocalStorage\b", re.IGNORECASE),
+     "Accessing localStorage is blocked for security"),
+    (re.compile(r"\bsessionStorage\b", re.IGNORECASE),
+     "Accessing sessionStorage is blocked for security"),
+    (re.compile(r"\bindexedDB\b", re.IGNORECASE),
+     "Accessing indexedDB is blocked for security"),
+    (re.compile(r"\bfetch\s*\(", re.IGNORECASE),
+     "Network requests via fetch() are blocked for security"),
+    (re.compile(r"\bXMLHttpRequest\b", re.IGNORECASE),
+     "Network requests via XMLHttpRequest are blocked for security"),
+    (re.compile(r"\bnew\s+WebSocket\s*\(", re.IGNORECASE),
+     "WebSocket connections are blocked for security"),
+    (re.compile(r"\bnavigator\s*\.\s*sendBeacon\s*\(", re.IGNORECASE),
+     "navigator.sendBeacon() is blocked for security"),
+    (re.compile(r"""\.src\s*=\s*['"`]https?://""", re.IGNORECASE),
+     "Setting element src to external URLs is blocked for security"),
+    (re.compile(r"\bimportScripts\s*\(", re.IGNORECASE),
+     "importScripts() is blocked for security"),
+    (re.compile(r"\b(?:input|textarea)\s*\[.*type\s*=\s*['\"]?password", re.IGNORECASE),
+     "Querying password fields is blocked for security"),
+    (re.compile(r"""document\.querySelectorAll\s*\(\s*['"][^'"]*type\s*=\s*['"]?password""", re.IGNORECASE),
+     "Querying password fields is blocked for security"),
+]
+
+
+def _validate_js_expression(expression: str) -> Optional[str]:
+    """Check a JS expression against dangerous patterns.
+
+    Returns an error message if the expression is blocked, or None if safe.
+    """
+    for pattern, message in _DANGEROUS_JS_PATTERNS:
+        if pattern.search(expression):
+            return message
+    from agent.redact import _PREFIX_RE
+    if _PREFIX_RE.search(expression):
+        return "Expression contains what appears to be an API key or token"
+    return None
+
+
 def _browser_eval(expression: str, task_id: Optional[str] = None) -> str:
     """Evaluate a JavaScript expression in the page context and return the result."""
+    blocked = _validate_js_expression(expression)
+    if blocked:
+        return json.dumps({
+            "success": False,
+            "error": f"Blocked: {blocked}. Use browser_snapshot or browser_navigate "
+                     "for safe page inspection instead.",
+        })
+
     if _is_camofox_mode():
         return _camofox_eval(expression, task_id)
 
