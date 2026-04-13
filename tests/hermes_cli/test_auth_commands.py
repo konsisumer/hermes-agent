@@ -24,7 +24,7 @@ def _jwt_with_email(email: str) -> str:
 
 
 @pytest.fixture(autouse=True)
-def _clear_provider_env(monkeypatch):
+def _clear_provider_env(monkeypatch, tmp_path):
     for key in (
         "OPENROUTER_API_KEY",
         "OPENAI_API_KEY",
@@ -33,6 +33,7 @@ def _clear_provider_env(monkeypatch):
         "CLAUDE_CODE_OAUTH_TOKEN",
     ):
         monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "fake_codex_home"))
 
 
 def test_auth_add_api_key_persists_manual_entry(tmp_path, monkeypatch):

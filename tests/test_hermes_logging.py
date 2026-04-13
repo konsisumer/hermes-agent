@@ -299,16 +299,12 @@ class TestGatewayMode:
         hermes_logging.setup_logging(hermes_home=hermes_home, mode="gateway")
 
         gw_logger = logging.getLogger("gateway.run")
-        file_logger = logging.getLogger("tools.file_tools")
-        # Ensure propagation and levels are clean (cross-test pollution defense)
-        gw_logger.propagate = True
-        file_logger.propagate = True
-        logging.getLogger("tools").propagate = True
-        file_logger.setLevel(logging.NOTSET)
-        logging.getLogger("tools").setLevel(logging.NOTSET)
-
+        tool_logger = logging.getLogger("tools.file_tools")
+        for lg in (gw_logger, tool_logger, logging.getLogger("tools")):
+            lg.propagate = True
+            lg.setLevel(logging.NOTSET)
         gw_logger.info("gateway msg")
-        file_logger.info("file msg")
+        tool_logger.info("file msg")
 
         for h in logging.getLogger().handlers:
             h.flush()
