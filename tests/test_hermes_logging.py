@@ -298,8 +298,12 @@ class TestGatewayMode:
         """agent.log (catch-all) still receives gateway AND tool records."""
         hermes_logging.setup_logging(hermes_home=hermes_home, mode="gateway")
 
-        logging.getLogger("gateway.run").info("gateway msg")
-        logging.getLogger("tools.file_tools").info("file msg")
+        gw_logger = logging.getLogger("gateway.run")
+        tool_logger = logging.getLogger("tools.file_tools")
+        for lg in (gw_logger, tool_logger, logging.getLogger("tools")):
+            lg.setLevel(logging.NOTSET)
+        gw_logger.info("gateway msg")
+        tool_logger.info("file msg")
 
         for h in logging.getLogger().handlers:
             h.flush()
