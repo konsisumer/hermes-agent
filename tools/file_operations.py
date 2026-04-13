@@ -99,12 +99,14 @@ def _get_safe_write_root() -> Optional[str]:
 def _is_write_denied(path: str) -> bool:
     """Return True if path is on the write deny list."""
     resolved = os.path.realpath(os.path.expanduser(str(path)))
+    normalized = os.path.normpath(os.path.expanduser(str(path)))
 
-    # 1) Static deny list
-    if resolved in WRITE_DENIED_PATHS:
+    # 1) Static deny list — check both resolved and normalized to catch
+    #    macOS symlinks like /etc -> /private/etc
+    if resolved in WRITE_DENIED_PATHS or normalized in WRITE_DENIED_PATHS:
         return True
     for prefix in WRITE_DENIED_PREFIXES:
-        if resolved.startswith(prefix):
+        if resolved.startswith(prefix) or normalized.startswith(prefix):
             return True
 
     # 2) Optional safe-root sandbox

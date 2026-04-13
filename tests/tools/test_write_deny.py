@@ -71,6 +71,25 @@ class TestWriteDenyPrefixes:
         assert _is_write_denied("/etc/systemd/system/evil.service") is True
 
 
+class TestMacOSSymlinkBypass:
+    """Ensure /private/etc paths are denied (issue #8734)."""
+
+    def test_private_etc_sudoers(self):
+        assert _is_write_denied("/private/etc/sudoers") is True
+
+    def test_private_etc_passwd(self):
+        assert _is_write_denied("/private/etc/passwd") is True
+
+    def test_private_etc_shadow(self):
+        assert _is_write_denied("/private/etc/shadow") is True
+
+    def test_private_etc_sudoers_d(self):
+        assert _is_write_denied("/private/etc/sudoers.d/custom") is True
+
+    def test_private_etc_systemd(self):
+        assert _is_write_denied("/private/etc/systemd/system/evil.service") is True
+
+
 class TestWriteAllowed:
     def test_tmp_file(self):
         assert _is_write_denied("/tmp/safe_file.txt") is False
