@@ -1,14 +1,26 @@
 import asyncio
 import os
 
+import pytest
+
 from gateway.config import Platform
 from gateway.run import GatewayRunner
 from gateway.session import SessionContext, SessionSource
 from gateway.session_context import (
+    _VAR_MAP,
     get_session_env,
     set_session_vars,
     clear_session_vars,
 )
+
+
+@pytest.fixture(autouse=True)
+def _reset_session_contextvars():
+    """Ensure session contextvars start at defaults so xdist worker ordering cannot leak state."""
+    old_tokens = [var.set("") for var in _VAR_MAP.values()]
+    yield
+    for var, token in zip(_VAR_MAP.values(), old_tokens):
+        var.reset(token)
 
 
 def test_set_session_env_sets_contextvars(monkeypatch):
