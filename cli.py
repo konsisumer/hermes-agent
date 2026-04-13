@@ -237,7 +237,6 @@ def load_cli_config() -> Dict[str, Any]:
         "compression": {
             "enabled": True,      # Auto-compress when approaching context limit
             "threshold": 0.50,    # Compress at 50% of model's context limit
-            "summary_model": "",  # Model for summaries (empty = use main model)
         },
         "smart_model_routing": {
             "enabled": False,
@@ -2999,8 +2998,10 @@ class HermesCLI:
                 )
 
         # Warn if the configured model is a Nous Hermes LLM (not agentic)
+        from hermes_cli.model_switch import is_nous_hermes_non_agentic
+
         model_name = getattr(self, "model", "") or ""
-        if "hermes" in model_name.lower():
+        if is_nous_hermes_non_agentic(model_name):
             self.console.print()
             self.console.print(
                 "[bold yellow]⚠  Nous Research Hermes 3 & 4 models are NOT agentic and are not "
@@ -3114,6 +3115,8 @@ class HermesCLI:
 
         # Collect displayable entries (skip system, tool-result messages)
         entries = []  # list of (role, display_text)
+        _last_asst_idx = None       # index of last assistant entry
+        _last_asst_full = None      # un-truncated display text for last assistant
         for msg in self.conversation_history:
             role = msg.get("role", "")
             content = msg.get("content")
@@ -3143,7 +3146,9 @@ class HermesCLI:
                 text = "" if content is None else str(content)
                 text = _strip_reasoning(text)
                 parts = []
+                full_parts = []  # un-truncated version
                 if text:
+                    full_parts.append(text)
                     lines = text.splitlines()
                     if len(lines) > MAX_ASST_LINES:
                         text = "\n".join(lines[:MAX_ASST_LINES]) + " ..."
@@ -3163,11 +3168,15 @@ class HermesCLI:
                     if len(names) > 4:
                         names_str += ", ..."
                     noun = "call" if tc_count == 1 else "calls"
-                    parts.append(f"[{tc_count} tool {noun}: {names_str}]")
+                    tc_summary = f"[{tc_count} tool {noun}: {names_str}]"
+                    parts.append(tc_summary)
+                    full_parts.append(tc_summary)
                 if not parts:
                     # Skip pure-reasoning messages that have no visible output
                     continue
                 entries.append(("assistant", " ".join(parts)))
+                _last_asst_idx = len(entries) - 1
+                _last_asst_full = " ".join(full_parts)
 
         if not entries:
             return
@@ -3177,6 +3186,13 @@ class HermesCLI:
         if len(entries) > MAX_DISPLAY_EXCHANGES * 2:
             skipped = len(entries) - MAX_DISPLAY_EXCHANGES * 2
             entries = entries[skipped:]
+
+        # Replace last assistant entry with full (un-truncated) text
+        # so the user can see where they left off without wasting tokens.
+        if _last_asst_idx is not None and _last_asst_full:
+            adj_idx = _last_asst_idx - skipped
+            if 0 <= adj_idx < len(entries):
+                entries[adj_idx] = ("assistant_last", _last_asst_full)
 
         # Build the display using Rich
         from rich.panel import Panel
@@ -3210,6 +3226,13 @@ class HermesCLI:
                 lines.append(msg_lines[0] + "\n", style="dim")
                 for ml in msg_lines[1:]:
                     lines.append(f"         {ml}\n", style="dim")
+            elif role == "assistant_last":
+                # Last assistant response shown in full, non-dim
+                lines.append("  ◆ Hermes: ", style=f"bold {_assistant_label_c}")
+                msg_lines = text.splitlines()
+                lines.append(msg_lines[0] + "\n", style="")
+                for ml in msg_lines[1:]:
+                    lines.append(f"            {ml}\n", style="")
             else:
                 lines.append("  ◆ Hermes: ", style=f"dim bold {_assistant_label_c}")
                 msg_lines = text.splitlines()
@@ -3353,6 +3376,93 @@ class HermesCLI:
         except ValueError:
             # Treat as a git hash
             return ref
+
+    def _handle_snapshot_command(self, command: str):
+        """Handle /snapshot — lightweight state snapshots for Hermes config/state.
+
+        Syntax:
+            /snapshot                  — list recent snapshots
+            /snapshot create [label]   — create a snapshot
+            /snapshot restore <id>     — restore state from snapshot
+            /snapshot prune [N]        — prune to N snapshots (default 20)
+        """
+        from hermes_cli.backup import (
+            create_quick_snapshot, list_quick_snapshots,
+            restore_quick_snapshot, prune_quick_snapshots,
+        )
+        from hermes_constants import display_hermes_home
+
+        parts = command.split()
+        subcmd = parts[1].lower() if len(parts) > 1 else "list"
+
+        if subcmd in ("list", "ls"):
+            snaps = list_quick_snapshots()
+            if not snaps:
+                print("  No state snapshots yet.")
+                print("  Create one: /snapshot create [label]")
+                return
+            print(f"  State snapshots ({display_hermes_home()}/state-snapshots/):\n")
+            print(f"  {'#':>3}  {'ID':<35} {'Files':>5} {'Size':>10} {'Label'}")
+            print(f"  {'─'*3}  {'─'*35} {'─'*5} {'─'*10} {'─'*20}")
+            for i, s in enumerate(snaps, 1):
+                size = s.get("total_size", 0)
+                if size < 1024:
+                    size_str = f"{size} B"
+                elif size < 1024 * 1024:
+                    size_str = f"{size / 1024:.0f} KB"
+                else:
+                    size_str = f"{size / 1024 / 1024:.1f} MB"
+                label = s.get("label") or ""
+                print(f"  {i:3}  {s['id']:<35} {s.get('file_count', 0):>5} {size_str:>10} {label}")
+
+        elif subcmd == "create":
+            label = " ".join(parts[2:]) if len(parts) > 2 else None
+            snap_id = create_quick_snapshot(label=label)
+            if snap_id:
+                print(f"  Snapshot created: {snap_id}")
+            else:
+                print("  No state files found to snapshot.")
+
+        elif subcmd in ("restore", "rewind"):
+            if len(parts) < 3:
+                print("  Usage: /snapshot restore <snapshot-id>")
+                # Show hint with most recent snapshot
+                snaps = list_quick_snapshots(limit=1)
+                if snaps:
+                    print(f"  Most recent: {snaps[0]['id']}")
+                return
+            snap_id = parts[2]
+            # Allow restore by number (1-indexed)
+            try:
+                idx = int(snap_id)
+                snaps = list_quick_snapshots()
+                if 1 <= idx <= len(snaps):
+                    snap_id = snaps[idx - 1]["id"]
+                else:
+                    print(f"  Invalid snapshot number. Use 1-{len(snaps)}.")
+                    return
+            except ValueError:
+                pass
+            if restore_quick_snapshot(snap_id):
+                print(f"  Restored state from: {snap_id}")
+                print("  Restart recommended for state.db changes to take effect.")
+            else:
+                print(f"  Snapshot not found: {snap_id}")
+
+        elif subcmd == "prune":
+            keep = 20
+            if len(parts) > 2:
+                try:
+                    keep = int(parts[2])
+                except ValueError:
+                    print("  Usage: /snapshot prune [keep-count]")
+                    return
+            deleted = prune_quick_snapshots(keep=keep)
+            print(f"  Pruned {deleted} old snapshot(s) (keeping {keep}).")
+
+        else:
+            print(f"  Unknown subcommand: {subcmd}")
+            print("  Usage: /snapshot [list|create [label]|restore <id>|prune [N]]")
 
     def _handle_stop_command(self):
         """Handle /stop — kill all running background processes.
@@ -4600,10 +4710,10 @@ class HermesCLI:
             user_provs = None
             custom_provs = None
             try:
-                from hermes_cli.config import load_config
+                from hermes_cli.config import get_compatible_custom_providers, load_config
                 cfg = load_config()
                 user_provs = cfg.get("providers")
-                custom_provs = cfg.get("custom_providers")
+                custom_provs = get_compatible_custom_providers(cfg)
             except Exception:
                 pass
 
@@ -5397,6 +5507,10 @@ class HermesCLI:
             self._handle_paste_command()
         elif canonical == "image":
             self._handle_image_command(cmd_original)
+        elif canonical == "reload":
+            from hermes_cli.config import reload_env
+            count = reload_env()
+            print(f"  Reloaded .env ({count} var(s) updated)")
         elif canonical == "reload-mcp":
             with self._busy_command(self._slow_command_status(cmd_original)):
                 self._reload_mcp()
@@ -5425,6 +5539,8 @@ class HermesCLI:
                 print(f"Plugin system error: {e}")
         elif canonical == "rollback":
             self._handle_rollback_command(cmd_original)
+        elif canonical == "snapshot":
+            self._handle_snapshot_command(cmd_original)
         elif canonical == "stop":
             self._handle_stop_command()
         elif canonical == "background":
@@ -7816,6 +7932,17 @@ class HermesCLI:
                 sys.stdout.write("\a")
                 sys.stdout.flush()
 
+            # Notify when iteration budget was hit
+            if result and not result.get("completed") and not result.get("interrupted"):
+                _api_calls = result.get("api_calls", 0)
+                if _api_calls >= getattr(self.agent, "max_iterations", 90):
+                    _max_iter = getattr(self.agent, "max_iterations", 90)
+                    _cprint(
+                        f"\n{_DIM}⚠ Iteration budget reached "
+                        f"({_api_calls}/{_max_iter}) — "
+                        f"response may be incomplete{_RST}"
+                    )
+
             # Speak response aloud if voice TTS is enabled
             # Skip batch TTS when streaming TTS already handled it
             if self._voice_tts and response and not use_streaming_tts:
@@ -8656,6 +8783,9 @@ class HermesCLI:
             if _should_auto_attach_clipboard_image_on_paste(pasted_text) and self._try_attach_clipboard_image():
                 event.app.invalidate()
             if pasted_text:
+                # Sanitize surrogate characters (e.g. from Word/Google Docs paste) before writing
+                from run_agent import _sanitize_surrogates
+                pasted_text = _sanitize_surrogates(pasted_text)
                 line_count = pasted_text.count('\n')
                 buf = event.current_buffer
                 if line_count >= 5 and not buf.text.strip().startswith('/'):
