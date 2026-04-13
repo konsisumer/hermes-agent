@@ -64,6 +64,7 @@ from gateway.platforms.base import (
     cache_image_from_bytes,
 )
 from hermes_constants import get_hermes_home
+from tools.path_security import validate_media_path
 from utils import atomic_json_write
 
 ILINK_BASE_URL = "https://ilinkai.weixin.qq.com"
@@ -1671,6 +1672,7 @@ class WeixinAdapter(BasePlatformAdapter):
             file_path = image_url.replace("file://", "")
             if not os.path.isabs(file_path):
                 file_path = os.path.abspath(file_path)
+            validate_media_path(Path(file_path))
             cleanup = False
         try:
             return await self.send_document(chat_id, file_path, caption=caption, metadata=metadata)

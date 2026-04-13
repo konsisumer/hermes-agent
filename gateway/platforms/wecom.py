@@ -67,6 +67,7 @@ from gateway.platforms.base import (
     cache_document_from_bytes,
     cache_image_from_bytes,
 )
+from tools.path_security import validate_media_path
 
 logger = logging.getLogger(__name__)
 
@@ -1068,6 +1069,8 @@ class WeComAdapter(BasePlatformAdapter):
 
         if not local_path.is_absolute():
             local_path = (Path.cwd() / local_path).resolve()
+
+        validate_media_path(local_path)
 
         if not local_path.exists() or not local_path.is_file():
             raise FileNotFoundError(f"Media file not found: {local_path}")

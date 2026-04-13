@@ -37,6 +37,7 @@ from gateway.platforms.base import (
     cache_image_from_url,
 )
 from gateway.platforms.helpers import redact_phone
+from tools.path_security import validate_media_path
 
 logger = logging.getLogger(__name__)
 
@@ -662,6 +663,11 @@ class SignalAdapter(BasePlatformAdapter):
 
         if not file_path or not Path(file_path).exists():
             return SendResult(success=False, error="Image file not found")
+
+        try:
+            validate_media_path(Path(file_path))
+        except PermissionError as e:
+            return SendResult(success=False, error=str(e))
 
         # Validate size
         file_size = Path(file_path).stat().st_size
