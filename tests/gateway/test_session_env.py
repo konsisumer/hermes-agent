@@ -16,6 +16,14 @@ from gateway.session_context import (
 
 @pytest.fixture(autouse=True)
 def _reset_session_contextvars():
+    """Force all session contextvars to defaults so tests are immune to xdist leakage."""
+    tokens = set_session_vars()
+    yield
+    clear_session_vars(tokens)
+
+
+@pytest.fixture(autouse=True)
+def _reset_session_contextvars():
     """Ensure session contextvars start at defaults so xdist worker ordering cannot leak state."""
     old_tokens = [var.set("") for var in _VAR_MAP.values()]
     yield
