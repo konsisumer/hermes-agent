@@ -45,6 +45,9 @@ _EXTRA_ENV_KEYS = frozenset({
     "WEIXIN_HOME_CHANNEL", "WEIXIN_HOME_CHANNEL_NAME", "WEIXIN_DM_POLICY", "WEIXIN_GROUP_POLICY",
     "WEIXIN_ALLOWED_USERS", "WEIXIN_GROUP_ALLOWED_USERS", "WEIXIN_ALLOW_ALL_USERS",
     "BLUEBUBBLES_SERVER_URL", "BLUEBUBBLES_PASSWORD",
+    "QQ_APP_ID", "QQ_CLIENT_SECRET", "QQ_HOME_CHANNEL", "QQ_HOME_CHANNEL_NAME",
+    "QQ_ALLOWED_USERS", "QQ_GROUP_ALLOWED_USERS", "QQ_ALLOW_ALL_USERS", "QQ_MARKDOWN_SUPPORT",
+    "QQ_STT_API_KEY", "QQ_STT_BASE_URL", "QQ_STT_MODEL",
     "TERMINAL_ENV", "TERMINAL_SSH_KEY", "TERMINAL_SSH_PORT",
     "WHATSAPP_MODE", "WHATSAPP_ENABLED",
     "MATTERMOST_HOME_CHANNEL", "MATTERMOST_REPLY_MODE",
@@ -816,6 +819,30 @@ OPTIONAL_ENV_VARS = {
         "category": "provider",
         "advanced": True,
     },
+    "KIMI_CN_API_KEY": {
+        "description": "Kimi / Moonshot China API key",
+        "prompt": "Kimi (China) API key",
+        "url": "https://platform.moonshot.cn/",
+        "password": True,
+        "category": "provider",
+        "advanced": True,
+    },
+    "ARCEEAI_API_KEY": {
+        "description": "Arcee AI API key",
+        "prompt": "Arcee AI API key",
+        "url": "https://chat.arcee.ai/",
+        "password": True,
+        "category": "provider",
+        "advanced": True,
+    },
+    "ARCEE_BASE_URL": {
+        "description": "Arcee AI base URL override",
+        "prompt": "Arcee base URL (leave empty for default)",
+        "url": None,
+        "password": False,
+        "category": "provider",
+        "advanced": True,
+    },
     "MINIMAX_API_KEY": {
         "description": "MiniMax API key (international)",
         "prompt": "MiniMax API key",
@@ -1168,7 +1195,7 @@ OPTIONAL_ENV_VARS = {
     "SLACK_BOT_TOKEN": {
         "description": "Slack bot token (xoxb-). Get from OAuth & Permissions after installing your app. "
                        "Required scopes: chat:write, app_mentions:read, channels:history, groups:history, "
-                       "im:history, im:read, im:write, users:read, files:write",
+                       "im:history, im:read, im:write, users:read, files:read, files:write",
         "prompt": "Slack Bot Token (xoxb-...)",
         "url": "https://api.slack.com/apps",
         "password": True,
@@ -1305,6 +1332,53 @@ OPTIONAL_ENV_VARS = {
         "prompt": "Allowed iMessage addresses (comma-separated)",
         "url": None,
         "password": False,
+        "category": "messaging",
+    },
+    "BLUEBUBBLES_ALLOW_ALL_USERS": {
+        "description": "Allow all BlueBubbles users without allowlist",
+        "prompt": "Allow All BlueBubbles Users",
+        "category": "messaging",
+    },
+    "QQ_APP_ID": {
+        "description": "QQ Bot App ID from QQ Open Platform (q.qq.com)",
+        "prompt": "QQ App ID",
+        "url": "https://q.qq.com",
+        "category": "messaging",
+    },
+    "QQ_CLIENT_SECRET": {
+        "description": "QQ Bot Client Secret from QQ Open Platform",
+        "prompt": "QQ Client Secret",
+        "password": True,
+        "category": "messaging",
+    },
+    "QQ_ALLOWED_USERS": {
+        "description": "Comma-separated QQ user IDs allowed to use the bot",
+        "prompt": "QQ Allowed Users",
+        "category": "messaging",
+    },
+    "QQ_GROUP_ALLOWED_USERS": {
+        "description": "Comma-separated QQ group IDs allowed to interact with the bot",
+        "prompt": "QQ Group Allowed Users",
+        "category": "messaging",
+    },
+    "QQ_ALLOW_ALL_USERS": {
+        "description": "Allow all QQ users without an allowlist (true/false)",
+        "prompt": "Allow All QQ Users",
+        "category": "messaging",
+    },
+    "QQ_HOME_CHANNEL": {
+        "description": "Default QQ channel/group for cron delivery and notifications",
+        "prompt": "QQ Home Channel",
+        "category": "messaging",
+    },
+    "QQ_HOME_CHANNEL_NAME": {
+        "description": "Display name for the QQ home channel",
+        "prompt": "QQ Home Channel Name",
+        "category": "messaging",
+    },
+    "QQ_SANDBOX": {
+        "description": "Enable QQ sandbox mode for development testing (true/false)",
+        "prompt": "QQ Sandbox Mode",
         "category": "messaging",
     },
     "GATEWAY_ALLOW_ALL_USERS": {
@@ -1648,7 +1722,8 @@ def get_compatible_custom_providers(
         provider_key = str(entry.get("provider_key", "") or "").strip().lower()
         name = str(entry.get("name", "") or "").strip().lower()
         base_url = str(entry.get("base_url", "") or "").strip().rstrip("/").lower()
-        pair = (name, base_url)
+        model = str(entry.get("model", "") or "").strip().lower()
+        pair = (name, base_url, model)
 
         if provider_key and provider_key in seen_provider_keys:
             return
@@ -2452,6 +2527,7 @@ _FALLBACK_COMMENT = """
 #   nous         (OAuth — hermes auth) — Nous Portal
 #   zai          (ZAI_API_KEY)         — Z.AI / GLM
 #   kimi-coding  (KIMI_API_KEY)        — Kimi / Moonshot
+#   kimi-coding-cn (KIMI_CN_API_KEY)   — Kimi / Moonshot (China)
 #   minimax      (MINIMAX_API_KEY)     — MiniMax
 #   minimax-cn   (MINIMAX_CN_API_KEY)  — MiniMax (China)
 #
@@ -2495,6 +2571,7 @@ _COMMENTED_SECTIONS = """
 #   nous         (OAuth — hermes auth) — Nous Portal
 #   zai          (ZAI_API_KEY)         — Z.AI / GLM
 #   kimi-coding  (KIMI_API_KEY)        — Kimi / Moonshot
+#   kimi-coding-cn (KIMI_CN_API_KEY)   — Kimi / Moonshot (China)
 #   minimax      (MINIMAX_API_KEY)     — MiniMax
 #   minimax-cn   (MINIMAX_CN_API_KEY)  — MiniMax (China)
 #

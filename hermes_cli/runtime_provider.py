@@ -287,6 +287,9 @@ def _get_named_custom_provider(requested_provider: str) -> Optional[Dict[str, An
             # Resolve the API key from the env var name stored in key_env
             key_env = str(entry.get("key_env", "") or "").strip()
             resolved_api_key = os.getenv(key_env, "").strip() if key_env else ""
+            # Fall back to inline api_key when key_env is absent or unresolvable
+            if not resolved_api_key:
+                resolved_api_key = str(entry.get("api_key", "") or "").strip()
 
             if requested_norm in {ep_name, name_norm, f"custom:{name_norm}"}:
                 # Found match by provider key
@@ -608,7 +611,7 @@ def _resolve_explicit_runtime(
 
         base_url = explicit_base_url
         if not base_url:
-            if provider == "kimi-coding":
+            if provider in ("kimi-coding", "kimi-coding-cn"):
                 creds = resolve_api_key_provider_credentials(provider)
                 base_url = creds.get("base_url", "").rstrip("/")
             else:
