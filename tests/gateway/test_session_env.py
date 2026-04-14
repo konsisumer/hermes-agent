@@ -169,9 +169,11 @@ def test_session_key_falls_back_to_os_environ(monkeypatch):
     assert get_session_env("HERMES_SESSION_KEY") == "env-session-123"
 
 
-def test_set_session_env_includes_session_key():
+def test_set_session_env_includes_session_key(monkeypatch):
     """_set_session_env should propagate session_key from SessionContext."""
     import contextvars
+
+    monkeypatch.delenv("HERMES_SESSION_KEY", raising=False)
 
     def _run():
         runner = object.__new__(GatewayRunner)
