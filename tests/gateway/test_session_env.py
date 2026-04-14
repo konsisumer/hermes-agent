@@ -16,14 +16,6 @@ from gateway.session_context import (
 
 @pytest.fixture(autouse=True)
 def _reset_session_contextvars():
-    """Force all session contextvars to defaults so tests are immune to xdist leakage."""
-    tokens = set_session_vars()
-    yield
-    clear_session_vars(tokens)
-
-
-@pytest.fixture(autouse=True)
-def _reset_session_contextvars():
     """Ensure session contextvars start at defaults so xdist worker ordering cannot leak state."""
     old_tokens = [var.set("") for var in _VAR_MAP.values()]
     yield
@@ -189,8 +181,9 @@ def test_session_key_falls_back_to_os_environ(monkeypatch):
     assert get_session_env("HERMES_SESSION_KEY") == "env-session-123"
 
 
-def test_set_session_env_includes_session_key():
+def test_set_session_env_includes_session_key(monkeypatch):
     """_set_session_env should propagate session_key from SessionContext."""
+    monkeypatch.delenv("HERMES_SESSION_KEY", raising=False)
     runner = object.__new__(GatewayRunner)
     source = SessionSource(
         platform=Platform.TELEGRAM,
