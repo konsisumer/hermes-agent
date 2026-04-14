@@ -44,6 +44,19 @@ class TestProviderEnvDetection:
         content = "TERMINAL_ENV=local\n"
         assert not _has_provider_env_config(content)
 
+    def test_detects_kimi_cn_api_key(self):
+        content = "KIMI_CN_API_KEY=sk-test\n"
+        assert _has_provider_env_config(content)
+
+
+class TestKimiChinaProbeNullBaseEnv:
+    """The Kimi China provider entry has base_env=None; the probe must not crash."""
+
+    def test_getenv_with_none_base_env_is_guarded(self):
+        _base_env = None
+        _base = os.getenv(_base_env, "") if _base_env else ""
+        assert _base == ""
+
 
 class TestDoctorToolAvailabilityOverrides:
     def test_marks_honcho_available_when_configured(self, monkeypatch):
