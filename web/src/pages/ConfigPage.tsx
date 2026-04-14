@@ -1,22 +1,38 @@
 import { useEffect, useRef, useState, useMemo } from "react";
 import {
+  Bot,
+  ChevronRight,
   Code,
+  Ear,
   Download,
+  FileText,
   FormInput,
+  Globe,
+  Lock,
+  MessageSquare,
+  Mic,
+  Monitor,
+  Package,
+  Palette,
   RotateCcw,
   Save,
+  ScrollText,
   Search,
-  Upload,
-  X,
-  ChevronRight,
+  Settings,
   Settings2,
-  FileText,
+  Upload,
+  Users,
+  Volume2,
+  Wrench,
+  X,
 } from "lucide-react";
+import type { ComponentType } from "react";
 import { api } from "@/lib/api";
 import { getNestedValue, setNestedValue } from "@/lib/nested";
 import { useToast } from "@/hooks/useToast";
 import { Toast } from "@/components/Toast";
 import { AutoField } from "@/components/AutoField";
+import { ModelInfoCard } from "@/components/ModelInfoCard";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -26,28 +42,34 @@ import { Badge } from "@/components/ui/badge";
 /*  Helpers                                                            */
 /* ------------------------------------------------------------------ */
 
-const CATEGORY_ICONS: Record<string, string> = {
-  general: "⚙️",
-  agent: "🤖",
-  terminal: "💻",
-  display: "🎨",
-  delegation: "👥",
-  memory: "🧠",
-  compression: "📦",
-  security: "🔒",
-  browser: "🌐",
-  voice: "🎙️",
-  tts: "🔊",
-  stt: "👂",
-  logging: "📋",
-  discord: "💬",
-  auxiliary: "🔧",
+const CATEGORY_ICONS: Record<string, ComponentType<{ className?: string }>> = {
+  general: Settings,
+  agent: Bot,
+  terminal: Monitor,
+  display: Palette,
+  delegation: Users,
+  memory: Package,
+  compression: Package,
+  security: Lock,
+  browser: Globe,
+  voice: Mic,
+  tts: Volume2,
+  stt: Ear,
+  logging: ScrollText,
+  discord: MessageSquare,
+  auxiliary: Wrench,
 };
+const FallbackIcon = FileText;
 
 function prettyCategoryName(cat: string): string {
   if (cat === "tts") return "Text-to-Speech";
   if (cat === "stt") return "Speech-to-Text";
   return cat.charAt(0).toUpperCase() + cat.slice(1);
+}
+
+function CategoryIcon({ cat, className }: { cat: string; className?: string }) {
+  const Icon = CATEGORY_ICONS[cat] ?? FallbackIcon;
+  return <Icon className={className} />;
 }
 
 /* ------------------------------------------------------------------ */
@@ -66,6 +88,7 @@ export default function ConfigPage() {
   const [yamlLoading, setYamlLoading] = useState(false);
   const [yamlSaving, setYamlSaving] = useState(false);
   const [activeCategory, setActiveCategory] = useState<string>("");
+  const [modelInfoRefreshKey, setModelInfoRefreshKey] = useState(0);
   const { toast, showToast } = useToast();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -153,6 +176,7 @@ export default function ConfigPage() {
     try {
       await api.saveConfig(config);
       showToast("Configuration saved", "success");
+      setModelInfoRefreshKey((k) => k + 1);
     } catch (e) {
       showToast(`Failed to save: ${e}`, "error");
     } finally {
@@ -165,6 +189,7 @@ export default function ConfigPage() {
     try {
       await api.saveConfigRaw(yamlText);
       showToast("YAML config saved", "success");
+      setModelInfoRefreshKey((k) => k + 1);
       api.getConfig().then(setConfig).catch(() => {});
     } catch (e) {
       showToast(`Failed to save YAML: ${e}`, "error");
@@ -217,6 +242,7 @@ export default function ConfigPage() {
   const renderFields = (fields: [string, Record<string, unknown>][], showCategory = false) => {
     let lastSection = "";
     let lastCat = "";
+    const currentModel = config ? String(getNestedValue(config, "model") ?? "") : "";
     return fields.map(([key, s]) => {
       const parts = key.split(".");
       const section = parts.length > 1 ? parts[0] : "";
@@ -230,7 +256,7 @@ export default function ConfigPage() {
         <div key={key}>
           {showCatBadge && (
             <div className="flex items-center gap-2 pt-4 pb-2 first:pt-0">
-              <span className="text-base">{CATEGORY_ICONS[cat] || "📄"}</span>
+              <CategoryIcon cat={cat} className="h-4 w-4 text-muted-foreground" />
               <span className="text-xs font-semibold uppercase tracking-wider text-muted-foreground">
                 {prettyCategoryName(cat)}
               </span>
@@ -253,6 +279,12 @@ export default function ConfigPage() {
               onChange={(v) => setConfig(setNestedValue(config, key, v))}
             />
           </div>
+          {/* Inject model info card right after the model field */}
+          {key === "model" && currentModel && (
+            <div className="py-1">
+              <ModelInfoCard currentModel={currentModel} refreshKey={modelInfoRefreshKey} />
+            </div>
+          )}
         </div>
       );
     });
@@ -266,7 +298,7 @@ export default function ConfigPage() {
       <div className="flex items-center justify-between gap-4">
         <div className="flex items-center gap-2">
           <Settings2 className="h-4 w-4 text-muted-foreground" />
-          <code className="text-xs text-muted-foreground bg-muted/50 px-2 py-0.5 rounded">
+          <code className="text-xs text-muted-foreground bg-muted/50 px-2 py-0.5">
             ~/.hermes/config.yaml
           </code>
         </div>
@@ -343,12 +375,12 @@ export default function ConfigPage() {
         </Card>
       ) : (
         /* ═══════════════ Form Mode ═══════════════ */
-        <div className="flex gap-4" style={{ minHeight: "calc(100vh - 180px)" }}>
-          {/* ---- Sidebar ---- */}
-          <div className="w-52 shrink-0">
-            <div className="sticky top-[72px] flex flex-col gap-1">
+        <div className="flex flex-col sm:flex-row gap-4" style={{ minHeight: "calc(100vh - 180px)" }}>
+          {/* ---- Sidebar — horizontal scroll on mobile, fixed column on sm+ ---- */}
+          <div className="sm:w-52 sm:shrink-0">
+            <div className="sm:sticky sm:top-[72px] flex flex-col gap-1">
               {/* Search */}
-              <div className="relative mb-2">
+              <div className="relative mb-2 hidden sm:block">
                 <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-muted-foreground" />
                 <Input
                   className="pl-8 h-8 text-xs"
@@ -367,8 +399,9 @@ export default function ConfigPage() {
                 )}
               </div>
 
-              {/* Category nav */}
-              {categories.map((cat) => {
+              {/* Category nav — horizontal scroll on mobile */}
+              <div className="flex sm:flex-col gap-1 overflow-x-auto sm:overflow-x-visible scrollbar-none pb-1 sm:pb-0">
+                {categories.map((cat) => {
                 const isActive = !isSearching && activeCategory === cat;
                 return (
                   <button
@@ -378,13 +411,13 @@ export default function ConfigPage() {
                       setSearchQuery("");
                       setActiveCategory(cat);
                     }}
-                    className={`group flex items-center gap-2 rounded-md px-2.5 py-1.5 text-left text-xs transition-colors cursor-pointer ${
+                    className={`group flex items-center gap-2 px-2.5 py-1.5 text-left text-xs transition-colors cursor-pointer ${
                       isActive
                         ? "bg-primary/10 text-primary font-medium"
                         : "text-muted-foreground hover:text-foreground hover:bg-muted/50"
                     }`}
                   >
-                    <span className="text-sm leading-none">{CATEGORY_ICONS[cat] || "📄"}</span>
+                    <CategoryIcon cat={cat} className="h-4 w-4 shrink-0" />
                     <span className="flex-1 truncate">{prettyCategoryName(cat)}</span>
                     <span className={`text-[10px] tabular-nums ${isActive ? "text-primary/60" : "text-muted-foreground/50"}`}>
                       {categoryCounts[cat] || 0}
@@ -395,6 +428,7 @@ export default function ConfigPage() {
                   </button>
                 );
               })}
+              </div>
             </div>
           </div>
 
@@ -430,7 +464,7 @@ export default function ConfigPage() {
                 <CardHeader className="py-3 px-4">
                   <div className="flex items-center justify-between">
                     <CardTitle className="text-sm flex items-center gap-2">
-                      <span className="text-base">{CATEGORY_ICONS[activeCategory] || "📄"}</span>
+                      <CategoryIcon cat={activeCategory} className="h-4 w-4" />
                       {prettyCategoryName(activeCategory)}
                     </CardTitle>
                     <Badge variant="secondary" className="text-[10px]">

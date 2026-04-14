@@ -1,9 +1,8 @@
 import { useEffect, useState, useCallback } from "react";
+import { formatTokenCount } from "@/lib/format";
 import {
   BarChart3,
-  Coins,
   Cpu,
-  Database,
   Hash,
   TrendingUp,
 } from "lucide-react";
@@ -20,22 +19,7 @@ const PERIODS = [
 
 const CHART_HEIGHT_PX = 160;
 
-function formatTokens(n: number): string {
-  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
-  return String(n);
-}
-
-function formatCost(n: number): string {
-  if (n < 0.01) return `$${n.toFixed(4)}`;
-  return `$${n.toFixed(2)}`;
-}
-
-/** Pick the best cost value: actual > estimated > 0 */
-function bestCost(entry: { estimated_cost: number; actual_cost?: number }): number {
-  if (entry.actual_cost && entry.actual_cost > 0) return entry.actual_cost;
-  return entry.estimated_cost;
-}
+const formatTokens = formatTokenCount;
 
 function formatDate(day: string): string {
   try {
@@ -85,11 +69,11 @@ function TokenBarChart({ daily }: { daily: AnalyticsDailyEntry[] }) {
         </div>
           <div className="flex items-center gap-4 text-xs text-muted-foreground">
           <div className="flex items-center gap-1.5">
-            <div className="h-2.5 w-2.5 rounded-sm bg-[#ffe6cb]" />
+            <div className="h-2.5 w-2.5 bg-[#ffe6cb]" />
             Input
           </div>
           <div className="flex items-center gap-1.5">
-            <div className="h-2.5 w-2.5 rounded-sm bg-emerald-500" />
+            <div className="h-2.5 w-2.5 bg-emerald-500" />
             Output
           </div>
         </div>
@@ -100,9 +84,6 @@ function TokenBarChart({ daily }: { daily: AnalyticsDailyEntry[] }) {
             const total = d.input_tokens + d.output_tokens;
             const inputH = Math.round((d.input_tokens / maxTokens) * CHART_HEIGHT_PX);
             const outputH = Math.round((d.output_tokens / maxTokens) * CHART_HEIGHT_PX);
-            const cacheReadPct = d.cache_read_tokens > 0
-              ? Math.round((d.cache_read_tokens / (d.input_tokens + d.cache_read_tokens)) * 100)
-              : 0;
             return (
               <div
                 key={d.day}
@@ -111,13 +92,11 @@ function TokenBarChart({ daily }: { daily: AnalyticsDailyEntry[] }) {
               >
                 {/* Tooltip */}
                 <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block z-10 pointer-events-none">
-                  <div className="rounded-md bg-card border border-border px-2.5 py-1.5 text-[10px] text-foreground shadow-lg whitespace-nowrap">
+                  <div className="bg-card border border-border px-2.5 py-1.5 text-[10px] text-foreground shadow-lg whitespace-nowrap">
                     <div className="font-medium">{formatDate(d.day)}</div>
                     <div>Input: {formatTokens(d.input_tokens)}</div>
                     <div>Output: {formatTokens(d.output_tokens)}</div>
-                    {cacheReadPct > 0 && <div>Cache hit: {cacheReadPct}%</div>}
                     <div>Total: {formatTokens(total)}</div>
-                    {bestCost(d) > 0 && <div>Cost: {formatCost(bestCost(d))}</div>}
                   </div>
                 </div>
                 {/* Input bar */}
@@ -168,17 +147,11 @@ function DailyTable({ daily }: { daily: AnalyticsDailyEntry[] }) {
                 <th className="text-left py-2 pr-4 font-medium">Date</th>
                 <th className="text-right py-2 px-4 font-medium">Sessions</th>
                 <th className="text-right py-2 px-4 font-medium">Input</th>
-                <th className="text-right py-2 px-4 font-medium">Output</th>
-                <th className="text-right py-2 px-4 font-medium">Cache Hit</th>
-                <th className="text-right py-2 pl-4 font-medium">Cost</th>
+                <th className="text-right py-2 pl-4 font-medium">Output</th>
               </tr>
             </thead>
             <tbody>
               {sorted.map((d) => {
-                const cost = bestCost(d);
-                const cacheHitPct = d.cache_read_tokens > 0 && d.input_tokens > 0
-                  ? Math.round((d.cache_read_tokens / d.input_tokens) * 100)
-                  : 0;
                 return (
                   <tr key={d.day} className="border-b border-border/50 hover:bg-secondary/20 transition-colors">
                     <td className="py-2 pr-4 font-medium">{formatDate(d.day)}</td>
@@ -186,14 +159,8 @@ function DailyTable({ daily }: { daily: AnalyticsDailyEntry[] }) {
                     <td className="text-right py-2 px-4">
                       <span className="text-[#ffe6cb]">{formatTokens(d.input_tokens)}</span>
                     </td>
-                    <td className="text-right py-2 px-4">
+                    <td className="text-right py-2 pl-4">
                       <span className="text-emerald-400">{formatTokens(d.output_tokens)}</span>
-                    </td>
-                    <td className="text-right py-2 px-4 text-muted-foreground">
-                      {cacheHitPct > 0 ? `${cacheHitPct}%` : "—"}
-                    </td>
-                    <td className="text-right py-2 pl-4 text-muted-foreground">
-                      {cost > 0 ? formatCost(cost) : "—"}
                     </td>
                   </tr>
                 );
@@ -228,8 +195,7 @@ function ModelTable({ models }: { models: AnalyticsModelEntry[] }) {
               <tr className="border-b border-border text-muted-foreground text-xs">
                 <th className="text-left py-2 pr-4 font-medium">Model</th>
                 <th className="text-right py-2 px-4 font-medium">Sessions</th>
-                <th className="text-right py-2 px-4 font-medium">Tokens</th>
-                <th className="text-right py-2 pl-4 font-medium">Cost</th>
+                <th className="text-right py-2 pl-4 font-medium">Tokens</th>
               </tr>
             </thead>
             <tbody>
@@ -239,13 +205,10 @@ function ModelTable({ models }: { models: AnalyticsModelEntry[] }) {
                     <span className="font-mono-ui text-xs">{m.model}</span>
                   </td>
                   <td className="text-right py-2 px-4 text-muted-foreground">{m.sessions}</td>
-                  <td className="text-right py-2 px-4">
+                  <td className="text-right py-2 pl-4">
                     <span className="text-[#ffe6cb]">{formatTokens(m.input_tokens)}</span>
                     {" / "}
                     <span className="text-emerald-400">{formatTokens(m.output_tokens)}</span>
-                  </td>
-                  <td className="text-right py-2 pl-4 text-muted-foreground">
-                    {m.estimated_cost > 0 ? formatCost(m.estimated_cost) : "—"}
                   </td>
                 </tr>
               ))}
@@ -311,8 +274,8 @@ export default function AnalyticsPage() {
 
       {data && (
         <>
-          {/* Summary cards — matches hermes's token model */}
-          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {/* Summary cards */}
+          <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
             <SummaryCard
               icon={Hash}
               label="Total Tokens"
@@ -320,28 +283,16 @@ export default function AnalyticsPage() {
               sub={`${formatTokens(data.totals.total_input)} in / ${formatTokens(data.totals.total_output)} out`}
             />
             <SummaryCard
-              icon={Database}
-              label="Cache Hit"
-              value={data.totals.total_cache_read > 0
-                ? `${Math.round((data.totals.total_cache_read / (data.totals.total_input + data.totals.total_cache_read)) * 100)}%`
-                : "—"}
-              sub={`${formatTokens(data.totals.total_cache_read)} tokens from cache`}
-            />
-            <SummaryCard
-              icon={Coins}
-              label="Total Cost"
-              value={formatCost(
-                data.totals.total_actual_cost > 0
-                  ? data.totals.total_actual_cost
-                  : data.totals.total_estimated_cost
-              )}
-              sub={data.totals.total_actual_cost > 0 ? "actual" : `estimated · last ${days}d`}
-            />
-            <SummaryCard
               icon={BarChart3}
               label="Total Sessions"
               value={String(data.totals.total_sessions)}
               sub={`~${(data.totals.total_sessions / days).toFixed(1)}/day avg`}
+            />
+            <SummaryCard
+              icon={TrendingUp}
+              label="API Calls"
+              value={String(data.daily.reduce((sum, d) => sum + d.sessions, 0))}
+              sub={`across ${data.by_model.length} models`}
             />
           </div>
 
