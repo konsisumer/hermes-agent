@@ -572,12 +572,12 @@ def switch_model(
                         ),
                     )
             else:
-                # --- Step c: On aggregator, convert vendor:model to vendor/model ---
+                # --- Step c: Convert vendor:model to vendor/model ---
                 # Only convert when there's no slash — a slash means the name
                 # is already in vendor/model format and the colon is a variant
                 # tag (:free, :extended, :fast) that must be preserved.
                 colon_pos = raw_input.find(":")
-                if colon_pos > 0 and "/" not in raw_input and is_aggregator(current_provider):
+                if colon_pos > 0 and "/" not in raw_input:
                     left = raw_input[:colon_pos].strip().lower()
                     right = raw_input[colon_pos + 1:].strip()
                     if left and right:

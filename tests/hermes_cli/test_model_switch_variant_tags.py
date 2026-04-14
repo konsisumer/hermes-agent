@@ -68,3 +68,22 @@ class TestVariantTagPreservation:
         """Standard vendor/model slugs without tags pass through unchanged."""
         result = _run_switch("anthropic/claude-sonnet-4.6")
         assert result == "anthropic/claude-sonnet-4.6"
+
+
+class TestColonFormatOnNonAggregator:
+    """Colon-to-slash conversion must work even when the current provider is not an aggregator."""
+
+    def test_colon_converted_on_non_aggregator_provider(self):
+        """vendor:model on a non-aggregator should convert colon to slash internally.
+
+        The final output is bare (no vendor prefix) because alibaba is a
+        direct provider whose normalize step strips the matching prefix.
+        """
+        result = _run_switch("Alibaba:qwen3.6-plus", current_provider="alibaba")
+        assert result == "qwen3.6-plus"
+
+    def test_colon_converted_on_non_aggregator_matches_slash_format(self):
+        """vendor:model and vendor/model must produce the same result on non-aggregator."""
+        colon_result = _run_switch("Alibaba:qwen3.6-plus", current_provider="alibaba")
+        slash_result = _run_switch("Alibaba/qwen3.6-plus", current_provider="alibaba")
+        assert colon_result == slash_result
