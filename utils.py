@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any, Union
@@ -29,6 +30,27 @@ def is_truthy_value(value: Any, default: bool = False) -> bool:
 def env_var_enabled(name: str, default: str = "") -> bool:
     """Return True when an environment variable is set to a truthy value."""
     return is_truthy_value(os.getenv(name, default), default=False)
+
+
+def _get_umask() -> int:
+    """Return the current process umask without permanently changing it."""
+    mask = os.umask(0)
+    os.umask(mask)
+    return mask
+
+
+def _apply_default_file_mode(path: Union[str, Path]) -> None:
+    """Chmod *path* to the mode a plain ``open()`` would have produced.
+
+    ``tempfile.mkstemp`` hard-codes 0600 for security, and ``os.replace``
+    preserves those bits.  This restores the standard 0666 & ~umask
+    behaviour so files land with the permissions the deployment expects
+    (e.g. 0660 under the NixOS managed-mode umask of 0007).
+    """
+    try:
+        os.chmod(path, 0o666 & ~_get_umask())
+    except OSError:
+        pass
 
 
 def atomic_json_write(
@@ -71,6 +93,7 @@ def atomic_json_write(
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, path)
+        _apply_default_file_mode(path)
     except BaseException:
         # Intentionally catch BaseException so temp-file cleanup still runs for
         # KeyboardInterrupt/SystemExit before re-raising the original signal.
@@ -119,6 +142,7 @@ def atomic_yaml_write(
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, path)
+        _apply_default_file_mode(path)
     except BaseException:
         # Match atomic_json_write: cleanup must also happen for process-level
         # interruptions before we re-raise them.
