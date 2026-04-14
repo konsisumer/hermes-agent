@@ -862,7 +862,9 @@ def list_authenticated_providers(
     # Build reverse mapping: models.dev ID → Hermes provider ID.
     # HERMES_OVERLAYS keys may be models.dev IDs (e.g. "github-copilot")
     # while _PROVIDER_MODELS and config.yaml use Hermes IDs ("copilot").
-    _mdev_to_hermes = {v: k for k, v in PROVIDER_TO_MODELS_DEV.items()}
+    _mdev_to_hermes: dict[str, str] = {}
+    for _h, _m in PROVIDER_TO_MODELS_DEV.items():
+        _mdev_to_hermes.setdefault(_m, _h)
 
     for pid, overlay in HERMES_OVERLAYS.items():
         if pid in seen_slugs:

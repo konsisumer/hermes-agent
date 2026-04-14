@@ -85,6 +85,7 @@ HERMES_OVERLAYS: Dict[str, HermesOverlay] = {
     ),
     "kimi-for-coding": HermesOverlay(
         transport="openai_chat",
+        extra_env_vars=("KIMI_API_KEY",),
         base_url_env_var="KIMI_BASE_URL",
     ),
     "minimax": HermesOverlay(
