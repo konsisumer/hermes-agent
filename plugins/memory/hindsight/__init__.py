@@ -11,6 +11,7 @@ Config via environment variables:
   HINDSIGHT_BUDGET    — recall budget: low/mid/high (default: mid)
   HINDSIGHT_API_URL   — API endpoint
   HINDSIGHT_MODE      — cloud or local (default: cloud)
+  HINDSIGHT_TIMEOUT   — HTTP client timeout in seconds (default: 120)
 
 Or via $HERMES_HOME/hindsight/config.json (profile-scoped), falling back to
 ~/.hindsight/config.json (legacy, shared) for backward compatibility.
@@ -458,7 +459,7 @@ class HindsightMemoryProvider(MemoryProvider):
                 self._client = HindsightEmbedded(**kwargs)
             else:
                 from hindsight_client import Hindsight
-                kwargs = {"base_url": self._api_url, "timeout": 30.0}
+                kwargs = {"base_url": self._api_url, "timeout": self._timeout}
                 if self._api_key:
                     kwargs["api_key"] = self._api_key
                 logger.debug("Creating Hindsight cloud client (url=%s, has_key=%s)",
@@ -537,6 +538,7 @@ class HindsightMemoryProvider(MemoryProvider):
         self._recall_prompt_preamble = self._config.get("recall_prompt_preamble", "")
         self._recall_max_input_chars = int(self._config.get("recall_max_input_chars", 800))
         self._retain_async = self._config.get("retain_async", True)
+        self._timeout = float(self._config.get("timeout") or os.environ.get("HINDSIGHT_TIMEOUT", 120.0))
 
         _client_version = "unknown"
         try:
