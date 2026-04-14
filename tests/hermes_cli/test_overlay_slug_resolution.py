@@ -16,6 +16,12 @@ import pytest
 from hermes_cli.model_switch import list_authenticated_providers
 
 
+@pytest.fixture(autouse=True)
+def _no_models_dev(monkeypatch):
+    """Prevent network calls to models.dev during overlay slug tests."""
+    monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda **kw: {})
+
+
 # -- Copilot slug resolution (env var path) ----------------------------------
 
 @patch.dict(os.environ, {"COPILOT_GITHUB_TOKEN": "fake-ghu"}, clear=False)
