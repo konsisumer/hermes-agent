@@ -973,7 +973,7 @@ def list_authenticated_providers(
         _cp_config = _auth_registry.get(_cp.slug)
         _cp_has_creds = False
         if _cp_config and _cp_config.api_key_env_vars:
-            _cp_has_creds = any(os.environ.get(ev) for ev in _cp_config.api_key_env_vars)
+            _cp_has_creds = _env_has_valid_creds(_cp.slug, _cp_config.api_key_env_vars)
         # Also check auth store and credential pool
         if not _cp_has_creds:
             try:
