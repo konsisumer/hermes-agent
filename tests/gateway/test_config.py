@@ -224,6 +224,32 @@ class TestLoadGatewayConfig:
         assert config.platforms[Platform.WHATSAPP].extra["unauthorized_dm_behavior"] == "pair"
 
 
+    def test_whatsapp_home_channel_persisted_by_sethome_survives_reload(self, tmp_path, monkeypatch):
+        """Regression: /sethome writes WHATSAPP_HOME_CHANNEL as a top-level
+        config.yaml key.  load_gateway_config must pick it up so the home
+        channel survives a restart.  (issue #9220)"""
+        hermes_home = tmp_path / ".hermes"
+        hermes_home.mkdir()
+        config_path = hermes_home / "config.yaml"
+        config_path.write_text(
+            "WHATSAPP_HOME_CHANNEL: '54449219494114@lid'\n"
+            "WHATSAPP_HOME_CHANNEL_NAME: Admin Chat\n",
+            encoding="utf-8",
+        )
+
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+        monkeypatch.setenv("WHATSAPP_ENABLED", "true")
+        monkeypatch.delenv("WHATSAPP_HOME_CHANNEL", raising=False)
+        monkeypatch.delenv("WHATSAPP_HOME_CHANNEL_NAME", raising=False)
+
+        config = load_gateway_config()
+
+        home = config.platforms[Platform.WHATSAPP].home_channel
+        assert home is not None, "WhatsApp home_channel should be loaded from config.yaml"
+        assert home.chat_id == "54449219494114@lid"
+        assert home.name == "Admin Chat"
+
+
 class TestHomeChannelEnvOverrides:
     """Home channel env vars should apply even when the platform was already
     configured via config.yaml (not just when credential env vars create it)."""
@@ -283,6 +309,12 @@ class TestHomeChannelEnvOverrides:
                 PlatformConfig(enabled=True, api_key="token_abc"),
                 {"SMS_HOME_CHANNEL": "+15559876543", "SMS_HOME_CHANNEL_NAME": "My Phone"},
                 ("+15559876543", "My Phone"),
+            ),
+            (
+                Platform.WHATSAPP,
+                PlatformConfig(enabled=True),
+                {"WHATSAPP_HOME_CHANNEL": "54449219494114@lid", "WHATSAPP_HOME_CHANNEL_NAME": "Admin Chat"},
+                ("54449219494114@lid", "Admin Chat"),
             ),
         ]
 
