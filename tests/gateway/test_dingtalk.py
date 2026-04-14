@@ -74,7 +74,7 @@ class TestDingTalkAdapterInit:
 
 
 # ---------------------------------------------------------------------------
-# Message text extraction
+# Message text extraction (via _extract_text_from_data on normalised dicts)
 # ---------------------------------------------------------------------------
 
 
@@ -82,31 +82,23 @@ class TestExtractText:
 
     def test_extracts_dict_text(self):
         from gateway.platforms.dingtalk import DingTalkAdapter
-        msg = MagicMock()
-        msg.text = {"content": "  hello world  "}
-        msg.rich_text = None
-        assert DingTalkAdapter._extract_text(msg) == "hello world"
+        msg = {"text": {"content": "  hello world  "}}
+        assert DingTalkAdapter._extract_text_from_data(msg) == "hello world"
 
     def test_extracts_string_text(self):
         from gateway.platforms.dingtalk import DingTalkAdapter
-        msg = MagicMock()
-        msg.text = "plain text"
-        msg.rich_text = None
-        assert DingTalkAdapter._extract_text(msg) == "plain text"
+        msg = {"text": "plain text"}
+        assert DingTalkAdapter._extract_text_from_data(msg) == "plain text"
 
     def test_falls_back_to_rich_text(self):
         from gateway.platforms.dingtalk import DingTalkAdapter
-        msg = MagicMock()
-        msg.text = ""
-        msg.rich_text = [{"text": "part1"}, {"text": "part2"}, {"image": "url"}]
-        assert DingTalkAdapter._extract_text(msg) == "part1 part2"
+        msg = {"text": "", "rich_text": [{"text": "part1"}, {"text": "part2"}, {"image": "url"}]}
+        assert DingTalkAdapter._extract_text_from_data(msg) == "part1 part2"
 
     def test_returns_empty_for_no_content(self):
         from gateway.platforms.dingtalk import DingTalkAdapter
-        msg = MagicMock()
-        msg.text = ""
-        msg.rich_text = None
-        assert DingTalkAdapter._extract_text(msg) == ""
+        msg = {"text": ""}
+        assert DingTalkAdapter._extract_text_from_data(msg) == ""
 
 
 # ---------------------------------------------------------------------------
@@ -262,6 +254,90 @@ class TestConnect:
         assert len(adapter._session_webhooks) == 0
         assert len(adapter._dedup._seen) == 0
         assert adapter._http_client is None
+
+
+# ---------------------------------------------------------------------------
+# Platform enum
+# ---------------------------------------------------------------------------
+
+
+# ---------------------------------------------------------------------------
+# Message normalisation (CallbackMessage vs ChatbotMessage)
+# ---------------------------------------------------------------------------
+
+
+class TestNormalizeMessage:
+
+    def test_normalizes_callback_message_dict_data(self):
+        from gateway.platforms.dingtalk import DingTalkAdapter
+        msg = MagicMock()
+        msg.data = {
+            "msgId": "id-123",
+            "text": {"content": "hello"},
+            "senderId": "u-1",
+            "senderNick": "Alice",
+            "conversationId": "conv-1",
+            "conversationType": "2",
+            "sessionWebhook": "https://api.dingtalk.com/hook",
+        }
+        result = DingTalkAdapter._normalize_message(msg)
+        assert result["message_id"] == "id-123"
+        assert result["text"] == {"content": "hello"}
+        assert result["sender_id"] == "u-1"
+        assert result["sender_nick"] == "Alice"
+        assert result["conversation_id"] == "conv-1"
+        assert result["conversation_type"] == "2"
+        assert result["session_webhook"] == "https://api.dingtalk.com/hook"
+
+    def test_normalizes_callback_message_json_string_data(self):
+        from gateway.platforms.dingtalk import DingTalkAdapter
+        msg = MagicMock()
+        msg.data = json.dumps({"msgId": "id-456", "text": {"content": "hi"}})
+        result = DingTalkAdapter._normalize_message(msg)
+        assert result["message_id"] == "id-456"
+        assert result["text"] == {"content": "hi"}
+
+    def test_normalizes_legacy_chatbot_message(self):
+        from gateway.platforms.dingtalk import DingTalkAdapter
+        msg = MagicMock(spec=[
+            "message_id", "text", "sender_id", "sender_nick",
+            "sender_staff_id", "conversation_id", "conversation_type",
+            "conversation_title", "session_webhook", "create_at", "rich_text",
+        ])
+        msg.data = None  # no .data attribute in legacy
+        msg.message_id = "legacy-1"
+        msg.text = "hello legacy"
+        msg.sender_id = "u-2"
+        msg.sender_nick = "Bob"
+        msg.sender_staff_id = ""
+        msg.conversation_id = "conv-2"
+        msg.conversation_type = "1"
+        msg.conversation_title = None
+        msg.session_webhook = "https://api.dingtalk.com/wh"
+        msg.create_at = None
+        msg.rich_text = None
+        result = DingTalkAdapter._normalize_message(msg)
+        assert result["message_id"] == "legacy-1"
+        assert result["text"] == "hello legacy"
+        assert result["sender_id"] == "u-2"
+
+
+# ---------------------------------------------------------------------------
+# Async stream start helper
+# ---------------------------------------------------------------------------
+
+
+class TestRunStreamSync:
+
+    def test_runs_async_start_in_new_loop(self):
+        from gateway.platforms.dingtalk import DingTalkAdapter
+        called = []
+
+        async def fake_start():
+            called.append(True)
+
+        DingTalkAdapter._run_stream_sync(fake_start)
+        assert called == [True]
 
 
 # ---------------------------------------------------------------------------

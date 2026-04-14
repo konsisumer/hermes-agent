@@ -18,9 +18,12 @@ Configuration in config.yaml:
 """
 
 import asyncio
+import inspect
+import json
 import logging
 import os
 import re
+import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -128,12 +131,21 @@ class DingTalkAdapter(BasePlatformAdapter):
             return False
 
     async def _run_stream(self) -> None:
-        """Run the blocking stream client with auto-reconnection."""
+        """Run the stream client with auto-reconnection.
+
+        dingtalk-stream >= 0.20 changed start() from sync to async. When async,
+        it needs its own event loop in a dedicated thread because internally it
+        runs a blocking WebSocket loop.
+        """
         backoff_idx = 0
         while self._running:
             try:
                 logger.debug("[%s] Starting stream client...", self.name)
-                await asyncio.to_thread(self._stream_client.start)
+                start_fn = self._stream_client.start
+                if inspect.iscoroutinefunction(start_fn):
+                    await asyncio.to_thread(self._run_stream_sync, start_fn)
+                else:
+                    await asyncio.to_thread(start_fn)
             except asyncio.CancelledError:
                 return
             except Exception as e:
@@ -148,6 +160,15 @@ class DingTalkAdapter(BasePlatformAdapter):
             logger.info("[%s] Reconnecting in %ds...", self.name, delay)
             await asyncio.sleep(delay)
             backoff_idx += 1
+
+    @staticmethod
+    def _run_stream_sync(async_start_fn) -> None:
+        """Run an async start() in a fresh event loop on the current thread."""
+        loop = asyncio.new_event_loop()
+        try:
+            loop.run_until_complete(async_start_fn())
+        finally:
+            loop.close()
 
     async def disconnect(self) -> None:
         """Disconnect from DingTalk."""
@@ -173,34 +194,37 @@ class DingTalkAdapter(BasePlatformAdapter):
 
     # -- Inbound message processing -----------------------------------------
 
-    async def _on_message(self, message: "ChatbotMessage") -> None:
-        """Process an incoming DingTalk chatbot message."""
-        msg_id = getattr(message, "message_id", None) or uuid.uuid4().hex
+    async def _on_message(self, message) -> None:
+        """Process an incoming DingTalk chatbot message.
+
+        Supports both legacy ChatbotMessage (dingtalk-stream < 0.20) and
+        CallbackMessage (>= 0.20) where fields live inside message.data.
+        """
+        msg = self._normalize_message(message)
+
+        msg_id = msg.get("message_id") or uuid.uuid4().hex
         if self._dedup.is_duplicate(msg_id):
             logger.debug("[%s] Duplicate message %s, skipping", self.name, msg_id)
             return
 
-        text = self._extract_text(message)
+        text = self._extract_text_from_data(msg)
         if not text:
             logger.debug("[%s] Empty message, skipping", self.name)
             return
 
-        # Chat context
-        conversation_id = getattr(message, "conversation_id", "") or ""
-        conversation_type = getattr(message, "conversation_type", "1")
+        conversation_id = msg.get("conversation_id", "")
+        conversation_type = msg.get("conversation_type", "1")
         is_group = str(conversation_type) == "2"
-        sender_id = getattr(message, "sender_id", "") or ""
-        sender_nick = getattr(message, "sender_nick", "") or sender_id
-        sender_staff_id = getattr(message, "sender_staff_id", "") or ""
+        sender_id = msg.get("sender_id", "")
+        sender_nick = msg.get("sender_nick", "") or sender_id
+        sender_staff_id = msg.get("sender_staff_id", "")
 
         chat_id = conversation_id or sender_id
         chat_type = "group" if is_group else "dm"
 
-        # Store session webhook for reply routing (validate origin to prevent SSRF)
-        session_webhook = getattr(message, "session_webhook", None) or ""
+        session_webhook = msg.get("session_webhook", "")
         if session_webhook and chat_id and _DINGTALK_WEBHOOK_RE.match(session_webhook):
             if len(self._session_webhooks) >= _SESSION_WEBHOOKS_MAX:
-                # Evict oldest entry to cap memory growth
                 try:
                     self._session_webhooks.pop(next(iter(self._session_webhooks)))
                 except StopIteration:
@@ -209,15 +233,14 @@ class DingTalkAdapter(BasePlatformAdapter):
 
         source = self.build_source(
             chat_id=chat_id,
-            chat_name=getattr(message, "conversation_title", None),
+            chat_name=msg.get("conversation_title"),
             chat_type=chat_type,
             user_id=sender_id,
             user_name=sender_nick,
             user_id_alt=sender_staff_id if sender_staff_id else None,
         )
 
-        # Parse timestamp
-        create_at = getattr(message, "create_at", None)
+        create_at = msg.get("create_at")
         try:
             timestamp = datetime.fromtimestamp(int(create_at) / 1000, tz=timezone.utc) if create_at else datetime.now(tz=timezone.utc)
         except (ValueError, OSError, TypeError):
@@ -237,17 +260,55 @@ class DingTalkAdapter(BasePlatformAdapter):
         await self.handle_message(event)
 
     @staticmethod
-    def _extract_text(message: "ChatbotMessage") -> str:
-        """Extract plain text from a DingTalk chatbot message."""
-        text = getattr(message, "text", None) or ""
+    def _normalize_message(message) -> Dict[str, Any]:
+        """Convert a ChatbotMessage or CallbackMessage into a plain dict.
+
+        dingtalk-stream >= 0.20 delivers a CallbackMessage whose payload is
+        in message.data (JSON string or dict).  Older versions deliver a
+        ChatbotMessage with attributes directly on the object.
+        """
+        data = getattr(message, "data", None)
+        if data is not None:
+            if isinstance(data, str):
+                try:
+                    data = json.loads(data)
+                except (json.JSONDecodeError, TypeError):
+                    data = {}
+            if isinstance(data, dict) and data:
+                _FIELD_MAP = {
+                    "msgId": "message_id",
+                    "text": "text",
+                    "senderId": "sender_id",
+                    "senderNick": "sender_nick",
+                    "senderStaffId": "sender_staff_id",
+                    "conversationId": "conversation_id",
+                    "conversationType": "conversation_type",
+                    "conversationTitle": "conversation_title",
+                    "sessionWebhook": "session_webhook",
+                    "createAt": "create_at",
+                    "robotCode": "robot_code",
+                }
+                return {v: data[k] for k, v in _FIELD_MAP.items() if k in data}
+
+        _ATTRS = [
+            "message_id", "text", "sender_id", "sender_nick",
+            "sender_staff_id", "conversation_id", "conversation_type",
+            "conversation_title", "session_webhook", "create_at",
+            "rich_text",
+        ]
+        return {a: getattr(message, a, None) for a in _ATTRS}
+
+    @staticmethod
+    def _extract_text_from_data(msg: Dict[str, Any]) -> str:
+        """Extract plain text from a normalised message dict."""
+        text = msg.get("text") or ""
         if isinstance(text, dict):
             content = text.get("content", "").strip()
         else:
             content = str(text).strip()
 
-        # Fall back to rich text if present
         if not content:
-            rich_text = getattr(message, "rich_text", None)
+            rich_text = msg.get("rich_text")
             if rich_text and isinstance(rich_text, list):
                 parts = [item["text"] for item in rich_text
                          if isinstance(item, dict) and item.get("text")]
@@ -306,7 +367,13 @@ class DingTalkAdapter(BasePlatformAdapter):
 # ---------------------------------------------------------------------------
 
 class _IncomingHandler(ChatbotHandler if DINGTALK_STREAM_AVAILABLE else object):
-    """dingtalk-stream ChatbotHandler that forwards messages to the adapter."""
+    """dingtalk-stream ChatbotHandler that forwards messages to the adapter.
+
+    dingtalk-stream >= 0.20 changed process() from sync to async and passes
+    CallbackMessage instead of ChatbotMessage.  This handler is async to
+    satisfy the new SDK, and dispatches to the gateway's main event loop
+    thread-safely (the stream SDK runs in its own thread/loop).
+    """
 
     def __init__(self, adapter: DingTalkAdapter, loop: asyncio.AbstractEventLoop):
         if DINGTALK_STREAM_AVAILABLE:
@@ -314,10 +381,11 @@ class _IncomingHandler(ChatbotHandler if DINGTALK_STREAM_AVAILABLE else object):
         self._adapter = adapter
         self._loop = loop
 
-    def process(self, message: "ChatbotMessage"):
-        """Called by dingtalk-stream in its thread when a message arrives.
+    async def process(self, message):
+        """Called by dingtalk-stream when a message arrives.
 
-        Schedules the async handler on the main event loop.
+        In >= 0.20 this runs in the stream client's own event loop thread.
+        We schedule _on_message on the gateway's main loop and wait for it.
         """
         loop = self._loop
         if loop is None or loop.is_closed():
