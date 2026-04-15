@@ -285,6 +285,8 @@ class TestPoolRotationCycle:
         pool.mark_exhausted_and_rotate = MagicMock(side_effect=rotate)
         agent._credential_pool = pool
         agent._swap_credential = MagicMock()
+        agent._emit_status = MagicMock()
+        agent.provider = "test-provider"
         agent.log_prefix = ""
 
         return agent, pool, entries
@@ -334,6 +336,49 @@ class TestPoolRotationCycle:
         assert recovered is True
         assert has_retried is False
         pool.mark_exhausted_and_rotate.assert_called_once_with(status_code=402, error_context=None)
+
+    def test_pool_exhaustion_emits_status_429(self):
+        """Pool exhaustion on 429 should emit a user-facing status notification."""
+        agent, pool, _ = self._make_agent_with_pool(1)
+        agent._recover_with_credential_pool(status_code=429, has_retried_429=False)
+        agent._recover_with_credential_pool(status_code=429, has_retried_429=True)
+        agent._emit_status.assert_called_once()
+        msg = agent._emit_status.call_args[0][0]
+        assert "rate-limited" in msg
+        assert "test-provider" in msg
+
+    def test_pool_exhaustion_emits_status_402(self):
+        """Pool exhaustion on 402 should emit a user-facing status notification."""
+        agent, pool, _ = self._make_agent_with_pool(1)
+        agent._recover_with_credential_pool(status_code=402, has_retried_429=False)
+        agent._emit_status.assert_called_once()
+        msg = agent._emit_status.call_args[0][0]
+        assert "billing" in msg
+        assert "test-provider" in msg
+
+    def test_pool_exhaustion_emits_status_401(self):
+        """Pool exhaustion on 401 should emit a user-facing status notification."""
+        from agent.error_classifier import FailoverReason
+
+        agent, pool, _ = self._make_agent_with_pool(1)
+        pool.try_refresh_current = MagicMock(return_value=None)
+        agent._recover_with_credential_pool(
+            status_code=401, has_retried_429=False,
+            classified_reason=FailoverReason.auth,
+        )
+        agent._emit_status.assert_called_once()
+        msg = agent._emit_status.call_args[0][0]
+        assert "invalid or expired" in msg
+        assert "test-provider" in msg
+
+    def test_successful_rotation_does_not_emit_status(self):
+        """Same-provider key rotation should remain silent."""
+        agent, pool, _ = self._make_agent_with_pool(3)
+        recovered, _ = agent._recover_with_credential_pool(
+            status_code=402, has_retried_429=False
+        )
+        assert recovered is True
+        agent._emit_status.assert_not_called()
 
     def test_no_pool_returns_false(self):
         """No pool should return (False, unchanged)."""
