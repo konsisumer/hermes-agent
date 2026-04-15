@@ -13,7 +13,7 @@ import os
 import json
 from pathlib import Path
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Any
+from typing import ClassVar, Dict, List, Optional, Any
 from enum import Enum
 
 from hermes_cli.config import get_hermes_home
@@ -171,19 +171,26 @@ class PlatformConfig:
             result["home_channel"] = self.home_channel.to_dict()
         return result
     
+    _KNOWN_FIELDS: ClassVar[frozenset] = frozenset(
+        {"enabled", "token", "api_key", "home_channel", "reply_to_mode", "extra"}
+    )
+
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "PlatformConfig":
         home_channel = None
         if "home_channel" in data:
             home_channel = HomeChannel.from_dict(data["home_channel"])
-        
+
+        overflow = {k: v for k, v in data.items() if k not in cls._KNOWN_FIELDS}
+        extra = {**overflow, **data.get("extra", {})}
+
         return cls(
             enabled=data.get("enabled", False),
             token=data.get("token"),
             api_key=data.get("api_key"),
             home_channel=home_channel,
             reply_to_mode=data.get("reply_to_mode", "first"),
-            extra=data.get("extra", {}),
+            extra=extra,
         )
 
 

@@ -52,6 +52,20 @@ class TestPlatformConfigRoundtrip:
         assert restored.enabled is False
         assert restored.token is None
 
+    def test_top_level_keys_forwarded_to_extra(self):
+        """Top-level platform keys like 'port' should land in extra."""
+        data = {"enabled": True, "port": 9100, "host": "127.0.0.1"}
+        restored = PlatformConfig.from_dict(data)
+        assert restored.enabled is True
+        assert restored.extra["port"] == 9100
+        assert restored.extra["host"] == "127.0.0.1"
+
+    def test_explicit_extra_wins_over_top_level(self):
+        """An explicit extra.port takes precedence over a top-level port."""
+        data = {"enabled": True, "port": 9100, "extra": {"port": 7777}}
+        restored = PlatformConfig.from_dict(data)
+        assert restored.extra["port"] == 7777
+
 
 class TestGetConnectedPlatforms:
     def test_returns_enabled_with_token(self):
