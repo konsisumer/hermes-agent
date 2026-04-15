@@ -910,6 +910,45 @@ class TestTaskSpecificOverrides:
         assert calls[0][1] == "gpt-5.4"
         assert calls[0][2]["api_mode"] == "codex_responses"
 
+    def test_resolve_auto_custom_provider_reads_base_url_from_config(self, monkeypatch, tmp_path):
+        """When main_runtime has provider=custom but no base_url, _resolve_auto
+        should read model.base_url from config.yaml instead of falling through
+        to the OpenRouter aggregator chain.  Regression test for #10314."""
+        hermes_home = tmp_path / "hermes"
+        hermes_home.mkdir(parents=True, exist_ok=True)
+        (hermes_home / "config.yaml").write_text(
+            """model:
+  default: qwen3.6-plus
+  provider: custom
+  base_url: https://dashscope-intl.aliyuncs.com/compatible-mode/v1
+  api_key: sk-dashscope-key
+"""
+        )
+        monkeypatch.setenv("HERMES_HOME", str(hermes_home))
+
+        calls = []
+
+        def _fake_resolve(provider, model=None, *args, **kwargs):
+            calls.append((provider, model, kwargs))
+            return MagicMock(), model or "resolved-model"
+
+        with patch("agent.auxiliary_client.resolve_provider_client", side_effect=_fake_resolve):
+            client, model = _resolve_auto(
+                main_runtime={
+                    "provider": "custom",
+                    "model": "qwen3.6-plus",
+                    "base_url": "",
+                    "api_key": "",
+                }
+            )
+
+        assert client is not None
+        assert model == "qwen3.6-plus"
+        assert calls[0][0] == "custom"
+        assert calls[0][1] == "qwen3.6-plus"
+        assert calls[0][2]["explicit_base_url"] == "https://dashscope-intl.aliyuncs.com/compatible-mode/v1"
+        assert calls[0][2]["explicit_api_key"] == "sk-dashscope-key"
+
     def test_explicit_compression_pin_still_wins_over_live_main_runtime(self, monkeypatch, tmp_path):
         """Task-level compression config should beat a live session override."""
         hermes_home = tmp_path / "hermes"

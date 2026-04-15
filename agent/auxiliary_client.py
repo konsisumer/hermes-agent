@@ -844,6 +844,36 @@ def _read_main_provider() -> str:
     return ""
 
 
+def _read_main_base_url() -> str:
+    """Read the user's configured main base_url from config.yaml."""
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        model_cfg = cfg.get("model", {})
+        if isinstance(model_cfg, dict):
+            base_url = model_cfg.get("base_url", "")
+            if isinstance(base_url, str) and base_url.strip():
+                return base_url.strip()
+    except Exception:
+        pass
+    return ""
+
+
+def _read_main_api_key() -> str:
+    """Read the user's configured main api_key from config.yaml."""
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+        model_cfg = cfg.get("model", {})
+        if isinstance(model_cfg, dict):
+            api_key = model_cfg.get("api_key", "")
+            if isinstance(api_key, str) and api_key.strip():
+                return api_key.strip()
+    except Exception:
+        pass
+    return ""
+
+
 def _resolve_custom_runtime() -> Tuple[Optional[str], Optional[str], Optional[str]]:
     """Resolve the active custom/main endpoint the same way the main CLI does.
 
@@ -1170,10 +1200,12 @@ def _resolve_auto(main_runtime: Optional[Dict[str, Any]] = None) -> Tuple[Option
         resolved_provider = main_provider
         explicit_base_url = None
         explicit_api_key = None
-        if runtime_base_url and (main_provider == "custom" or main_provider.startswith("custom:")):
-            resolved_provider = "custom"
-            explicit_base_url = runtime_base_url
-            explicit_api_key = runtime_api_key or None
+        if main_provider == "custom" or main_provider.startswith("custom:"):
+            _base = runtime_base_url or _read_main_base_url()
+            if _base:
+                resolved_provider = "custom"
+                explicit_base_url = _base
+                explicit_api_key = runtime_api_key or _read_main_api_key() or None
         client, resolved = resolve_provider_client(
             resolved_provider,
             main_model,
