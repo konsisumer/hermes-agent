@@ -19,6 +19,7 @@ Storage: ~/.hermes/pairing/
 """
 
 import json
+import logging
 import os
 import secrets
 import tempfile
@@ -26,6 +27,8 @@ import threading
 import time
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger(__name__)
 
 from hermes_constants import get_hermes_dir
 
@@ -46,6 +49,23 @@ MAX_FAILED_ATTEMPTS = 5             # Failed approvals before lockout
 PAIRING_DIR = get_hermes_dir("platforms/pairing", "pairing")
 
 
+def _match_dir_owner(path: Path) -> None:
+    """If running as root, chown *path* to match its parent directory's owner.
+
+    This handles the common Docker scenario where ``docker exec`` runs as root
+    but the gateway process dropped privileges to a non-root user.  Without the
+    chown the gateway cannot read files the CLI just wrote.
+    """
+    if os.getuid() != 0:
+        return
+    try:
+        dir_stat = path.parent.stat()
+        if dir_stat.st_uid != 0:
+            os.chown(path, dir_stat.st_uid, dir_stat.st_gid)
+    except OSError:
+        pass
+
+
 def _secure_write(path: Path, data: str) -> None:
     """Write data to file with restrictive permissions (owner read/write only).
 
@@ -64,6 +84,7 @@ def _secure_write(path: Path, data: str) -> None:
             os.chmod(path, 0o600)
         except OSError:
             pass  # Windows doesn't support chmod the same way
+        _match_dir_owner(path)
     except BaseException:
         try:
             os.unlink(tmp_path)
@@ -101,6 +122,13 @@ class PairingStore:
         if path.exists():
             try:
                 return json.loads(path.read_text(encoding="utf-8"))
+            except PermissionError:
+                logger.warning(
+                    "Cannot read %s (permission denied). If running in Docker, "
+                    "re-run the pairing command with: docker exec -u hermes …",
+                    path,
+                )
+                return {}
             except (json.JSONDecodeError, OSError):
                 return {}
         return {}

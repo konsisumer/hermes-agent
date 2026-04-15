@@ -1,6 +1,7 @@
 """Tests for gateway/pairing.py — DM pairing security system."""
 
 import json
+import logging
 import os
 import time
 from pathlib import Path
@@ -15,6 +16,7 @@ from gateway.pairing import (
     MAX_PENDING_PER_PLATFORM,
     MAX_FAILED_ATTEMPTS,
     LOCKOUT_SECONDS,
+    _match_dir_owner,
     _secure_write,
 )
 
@@ -42,6 +44,65 @@ class TestSecureWrite:
         _secure_write(target, "data")
         mode = oct(target.stat().st_mode & 0o777)
         assert mode == "0o600"
+
+    def test_match_dir_owner_skips_non_root(self, tmp_path):
+        target = tmp_path / "file.json"
+        target.write_text("x")
+        uid_before = target.stat().st_uid
+        with patch("gateway.pairing.os.getuid", return_value=1000):
+            _match_dir_owner(target)
+        assert target.stat().st_uid == uid_before
+
+    def test_match_dir_owner_calls_chown_when_root(self, tmp_path):
+        target = tmp_path / "file.json"
+        target.write_text("x")
+        dir_stat = tmp_path.stat()
+        with patch("gateway.pairing.os.getuid", return_value=0), \
+             patch("gateway.pairing.os.chown") as mock_chown:
+            _match_dir_owner(target)
+        if dir_stat.st_uid != 0:
+            mock_chown.assert_called_once_with(
+                target, dir_stat.st_uid, dir_stat.st_gid,
+            )
+
+    def test_secure_write_calls_match_dir_owner(self, tmp_path):
+        target = tmp_path / "file.json"
+        with patch("gateway.pairing._match_dir_owner") as mock_match:
+            _secure_write(target, "data")
+        mock_match.assert_called_once_with(target)
+
+
+# ---------------------------------------------------------------------------
+# Permission error logging
+# ---------------------------------------------------------------------------
+
+
+class TestPermissionErrorLogging:
+    def test_load_json_logs_warning_on_permission_error(self, tmp_path, caplog):
+        with patch("gateway.pairing.PAIRING_DIR", tmp_path):
+            store = PairingStore()
+            path = tmp_path / "weixin-approved.json"
+            path.write_text('{"user1": {}}')
+            path.chmod(0o000)
+            try:
+                with caplog.at_level(logging.WARNING, logger="gateway.pairing"):
+                    result = store.is_approved("weixin", "user1")
+            finally:
+                path.chmod(0o600)
+        assert result is False
+        assert "permission denied" in caplog.text.lower()
+
+    def test_load_json_returns_empty_on_permission_error(self, tmp_path):
+        with patch("gateway.pairing.PAIRING_DIR", tmp_path):
+            store = PairingStore()
+            path = tmp_path / "telegram-approved.json"
+            path.write_text('{"user1": {}}')
+            path.chmod(0o000)
+            try:
+                result = store._load_json(path)
+            finally:
+                path.chmod(0o600)
+        assert result == {}
 
 
 # ---------------------------------------------------------------------------
