@@ -66,6 +66,8 @@ try:
         GetMessageRequest,
         GetMessageResourceRequest,
         P2ImMessageMessageReadV1,
+        PatchMessageRequest,
+        PatchMessageRequestBody,
         ReplyMessageRequest,
         ReplyMessageRequestBody,
         UpdateMessageRequest,
@@ -1905,16 +1907,10 @@ class FeishuAdapter(BasePlatformAdapter):
 
         if P2CardActionTriggerResponse is None:
             return None
-        response = P2CardActionTriggerResponse()
-        if CallBackCard is not None:
-            card = CallBackCard()
-            card.type = "raw"
-            card.data = self._build_resolved_approval_card(choice=choice, user_name=user_name)
-            response.card = card
-        return response
+        return P2CardActionTriggerResponse()
 
     async def _resolve_approval(self, approval_id: Any, choice: str, user_name: str) -> None:
-        """Pop approval state and unblock the waiting agent thread."""
+        """Pop approval state, unblock the waiting agent thread, and update the card."""
         state = self._approval_state.pop(approval_id, None)
         if not state:
             logger.debug("[Feishu] Approval %s already resolved or unknown", approval_id)
@@ -1928,6 +1924,30 @@ class FeishuAdapter(BasePlatformAdapter):
             )
         except Exception as exc:
             logger.error("Failed to resolve gateway approval from Feishu button: %s", exc)
+
+        await self._patch_approval_card(state.get("message_id", ""), choice, user_name)
+
+    async def _patch_approval_card(self, message_id: str, choice: str, user_name: str) -> None:
+        """Update the approval card via PATCH (the only verb Feishu allows for interactive cards)."""
+        if not message_id or not self._client:
+            return
+        try:
+            card_json = json.dumps(
+                self._build_resolved_approval_card(choice=choice, user_name=user_name),
+                ensure_ascii=False,
+            )
+            body = PatchMessageRequestBody.builder().content(card_json).build()
+            request = PatchMessageRequest.builder().message_id(message_id).request_body(body).build()
+            response = await asyncio.to_thread(self._client.im.v1.message.patch, request)
+            if not getattr(response, "success", lambda: False)():
+                logger.warning(
+                    "[Feishu] Failed to patch approval card %s: code=%s msg=%s",
+                    message_id,
+                    getattr(response, "code", "?"),
+                    getattr(response, "msg", "?"),
+                )
+        except Exception as exc:
+            logger.warning("[Feishu] Failed to patch approval card %s: %s", message_id, exc)
 
     async def _handle_reaction_event(self, event_type: str, data: Any) -> None:
         """Fetch the reacted-to message; if it was sent by this bot, emit a synthetic text event."""
