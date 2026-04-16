@@ -10,6 +10,7 @@ runs at a time if multiple processes overlap.
 
 import asyncio
 import concurrent.futures
+import contextvars
 import json
 import logging
 import os
@@ -44,7 +45,8 @@ logger = logging.getLogger(__name__)
 _KNOWN_DELIVERY_PLATFORMS = frozenset({
     "telegram", "discord", "slack", "whatsapp", "signal",
     "matrix", "mattermost", "homeassistant", "dingtalk", "feishu",
-    "wecom", "weixin", "sms", "email", "webhook", "bluebubbles",
+    "wecom", "wecom_callback", "weixin", "sms", "email", "webhook", "bluebubbles",
+    "qqbot",
 })
 
 from cron.jobs import get_due_jobs, mark_job_run, save_job_output, advance_next_run
@@ -219,6 +221,21 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
     chat_id = target["chat_id"]
     thread_id = target.get("thread_id")
 
+    # Diagnostic: log thread_id for topic-aware delivery debugging
+    origin = job.get("origin") or {}
+    origin_thread = origin.get("thread_id")
+    if origin_thread and not thread_id:
+        logger.warning(
+            "Job '%s': origin has thread_id=%s but delivery target lost it "
+            "(deliver=%s, target=%s)",
+            job["id"], origin_thread, job.get("deliver", "local"), target,
+        )
+    elif thread_id:
+        logger.debug(
+            "Job '%s': delivering to %s:%s thread_id=%s",
+            job["id"], platform_name, chat_id, thread_id,
+        )
+
     from tools.send_message_tool import _send_to_platform
     from gateway.config import load_gateway_config, Platform
 
@@ -234,10 +251,12 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
         "dingtalk": Platform.DINGTALK,
         "feishu": Platform.FEISHU,
         "wecom": Platform.WECOM,
+        "wecom_callback": Platform.WECOM_CALLBACK,
         "weixin": Platform.WEIXIN,
         "email": Platform.EMAIL,
         "sms": Platform.SMS,
         "bluebubbles": Platform.BLUEBUBBLES,
+        "qqbot": Platform.QQBOT,
     }
     platform = platform_map.get(platform_name.lower())
     if not platform:
@@ -270,11 +289,13 @@ def _deliver_result(job: dict, content: str, adapters=None, loop=None) -> Option
 
     if wrap_response:
         task_name = job.get("name", job["id"])
+        job_id = job.get("id", "")
         delivery_content = (
             f"Cronjob Response: {task_name}\n"
+            f"(job_id: {job_id})\n"
             f"-------------\n\n"
             f"{content}\n\n"
-            f"Note: The agent cannot see this message, and therefore cannot respond to it."
+            f"To stop or manage this job, send me a new message (e.g. \"stop reminder {task_name}\")."
         )
     else:
         delivery_content = content
@@ -625,6 +646,15 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         except Exception as e:
             logger.warning("Job '%s': failed to load config.yaml, using defaults: %s", job_id, e)
 
+        # Apply IPv4 preference if configured.
+        try:
+            from hermes_constants import apply_ipv4_preference
+            _net_cfg = _cfg.get("network", {})
+            if isinstance(_net_cfg, dict) and _net_cfg.get("force_ipv4"):
+                apply_ipv4_preference(force=True)
+        except Exception:
+            pass
+
         # Reasoning config from config.yaml
         from hermes_constants import parse_reasoning_effort
         effort = str(_cfg.get("agent", {}).get("reasoning_effort", "")).strip()
@@ -722,6 +752,7 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             provider_sort=pr.get("sort"),
             disabled_toolsets=["cronjob", "messaging", "clarify"],
             quiet_mode=True,
+            skip_context_files=True,  # Don't inject SOUL.md/AGENTS.md from scheduler cwd
             skip_memory=True,  # Cron system prompts would corrupt user representations
             platform="cron",
             session_id=_cron_session_id,
@@ -740,7 +771,11 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
         _cron_inactivity_limit = _cron_timeout if _cron_timeout > 0 else None
         _POLL_INTERVAL = 5.0
         _cron_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-        _cron_future = _cron_pool.submit(agent.run_conversation, prompt)
+        # Preserve scheduler-scoped ContextVar state (for example skill-declared
+        # env passthrough registrations) when the cron run hops into the worker
+        # thread used for inactivity timeout monitoring.
+        _cron_context = contextvars.copy_context()
+        _cron_future = _cron_pool.submit(_cron_context.run, agent.run_conversation, prompt)
         _inactivity_timeout = False
         try:
             if _cron_inactivity_limit is None:
@@ -802,6 +837,9 @@ def run_job(job: dict) -> tuple[bool, str, str, Optional[str]]:
             )
 
         final_response = result.get("final_response", "") or ""
+        # Strip leaked placeholder text that upstream may inject on empty completions.
+        if final_response.strip() == "(No response generated)":
+            final_response = ""
         # Use a separate variable for log display; keep final_response clean
         # for delivery logic (empty response = no delivery).
         logged_response = final_response if final_response else "(No response generated)"
@@ -940,6 +978,13 @@ def tick(verbose: bool = True, adapters=None, loop=None) -> int:
                     except Exception as de:
                         delivery_error = str(de)
                         logger.error("Delivery failed for job %s: %s", job["id"], de)
+
+                # Treat empty final_response as a soft failure so last_status
+                # is not "ok" — the agent ran but produced nothing useful.
+                # (issue #8585)
+                if success and not final_response:
+                    success = False
+                    error = "Agent completed but produced empty response (model error, timeout, or misconfiguration)"
 
                 mark_job_run(job["id"], success, error, delivery_error=delivery_error)
                 executed += 1

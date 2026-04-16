@@ -10,7 +10,6 @@ Uses discord.py library for:
 """
 
 import asyncio
-import json
 import logging
 import os
 import struct
@@ -19,7 +18,6 @@ import tempfile
 import threading
 import time
 from collections import defaultdict
-from pathlib import Path
 from typing import Callable, Dict, Optional, Any
 
 logger = logging.getLogger(__name__)
@@ -45,6 +43,7 @@ sys.path.insert(0, str(_Path(__file__).resolve().parents[2]))
 from gateway.config import Platform, PlatformConfig
 import re
 
+from gateway.platforms.helpers import MessageDeduplicator, ThreadParticipationTracker
 from gateway.platforms.base import (
     BasePlatformAdapter,
     MessageEvent,
@@ -441,6 +440,7 @@ class DiscordAdapter(BasePlatformAdapter):
         self._pending_text_batches: Dict[str, MessageEvent] = {}
         self._pending_text_batch_tasks: Dict[str, asyncio.Task] = {}
         self._voice_text_channels: Dict[int, int] = {}  # guild_id -> text_channel_id
+        self._voice_sources: Dict[int, Dict[str, Any]] = {}  # guild_id -> linked text channel source metadata
         self._voice_timeout_tasks: Dict[int, asyncio.Task] = {}  # guild_id -> timeout task
         # Phase 2: voice listening
         self._voice_receivers: Dict[int, VoiceReceiver] = {}  # guild_id -> VoiceReceiver
@@ -450,18 +450,15 @@ class DiscordAdapter(BasePlatformAdapter):
         # Track threads where the bot has participated so follow-up messages
         # in those threads don't require @mention.  Persisted to disk so the
         # set survives gateway restarts.
-        self._bot_participated_threads: set = self._load_participated_threads()
+        self._threads = ThreadParticipationTracker("discord")
         # Persistent typing indicator loops per channel (DMs don't reliably
         # show the standard typing gateway event for bots)
         self._typing_tasks: Dict[str, asyncio.Task] = {}
         self._bot_task: Optional[asyncio.Task] = None
-        # Cap to prevent unbounded growth (Discord threads get archived).
-        self._MAX_TRACKED_THREADS = 500
-        # Dedup cache: message_id → timestamp.  Prevents duplicate bot
-        # responses when Discord RESUME replays events after reconnects.
-        self._seen_messages: Dict[str, float] = {}
-        self._SEEN_TTL = 300   # 5 minutes
-        self._SEEN_MAX = 2000  # prune threshold
+        self._post_connect_task: Optional[asyncio.Task] = None
+        # Dedup cache: prevents duplicate bot responses when Discord
+        # RESUME replays events after reconnects.
+        self._dedup = MessageDeduplicator()
         # Reply threading mode: "off" (no replies), "first" (reply on first
         # chunk only, default), "all" (reply-reference on every chunk).
         self._reply_to_mode: str = getattr(config, 'reply_to_mode', 'first') or 'first'
@@ -502,17 +499,8 @@ class DiscordAdapter(BasePlatformAdapter):
             return False
 
         try:
-            # Acquire scoped lock to prevent duplicate bot token usage
-            from gateway.status import acquire_scoped_lock
-            self._token_lock_identity = self.config.token
-            acquired, existing = acquire_scoped_lock('discord-bot-token', self._token_lock_identity, metadata={'platform': 'discord'})
-            if not acquired:
-                owner_pid = existing.get('pid') if isinstance(existing, dict) else None
-                message = f'Discord bot token already in use' + (f' (PID {owner_pid})' if owner_pid else '') + '. Stop the other gateway first.'
-                logger.error('[%s] %s', self.name, message)
-                self._set_fatal_error('discord_token_lock', message, retryable=False)
+            if not self._acquire_platform_lock('discord-bot-token', self.config.token, 'Discord bot token'):
                 return False
-
 
             # Parse allowed user entries (may contain usernames or IDs)
             allowed_env = os.getenv("DISCORD_ALLOWED_USERS", "")
@@ -557,29 +545,19 @@ class DiscordAdapter(BasePlatformAdapter):
 
                 # Resolve any usernames in the allowed list to numeric IDs
                 await adapter_self._resolve_allowed_usernames()
-
-                # Sync slash commands with Discord
-                try:
-                    synced = await adapter_self._client.tree.sync()
-                    logger.info("[%s] Synced %d slash command(s)", adapter_self.name, len(synced))
-                except Exception as e:  # pragma: no cover - defensive logging
-                    logger.warning("[%s] Slash command sync failed: %s", adapter_self.name, e, exc_info=True)
                 adapter_self._ready_event.set()
+
+                if adapter_self._post_connect_task and not adapter_self._post_connect_task.done():
+                    adapter_self._post_connect_task.cancel()
+                adapter_self._post_connect_task = asyncio.create_task(
+                    adapter_self._run_post_connect_initialization()
+                )
 
             @self._client.event
             async def on_message(message: DiscordMessage):
                 # Dedup: Discord RESUME replays events after reconnects (#4777)
-                msg_id = str(message.id)
-                now = time.time()
-                if msg_id in adapter_self._seen_messages:
+                if adapter_self._dedup.is_duplicate(str(message.id)):
                     return
-                adapter_self._seen_messages[msg_id] = now
-                if len(adapter_self._seen_messages) > adapter_self._SEEN_MAX:
-                    cutoff = now - adapter_self._SEEN_TTL
-                    adapter_self._seen_messages = {
-                        k: v for k, v in adapter_self._seen_messages.items()
-                        if v > cutoff
-                    }
 
                 # Always ignore our own messages
                 if message.author == self._client.user:
@@ -685,23 +663,11 @@ class DiscordAdapter(BasePlatformAdapter):
 
         except asyncio.TimeoutError:
             logger.error("[%s] Timeout waiting for connection to Discord", self.name, exc_info=True)
-            try:
-                from gateway.status import release_scoped_lock
-                if getattr(self, '_token_lock_identity', None):
-                    release_scoped_lock('discord-bot-token', self._token_lock_identity)
-                    self._token_lock_identity = None
-            except Exception:
-                pass
+            self._release_platform_lock()
             return False
         except Exception as e:  # pragma: no cover - defensive logging
             logger.error("[%s] Failed to connect to Discord: %s", self.name, e, exc_info=True)
-            try:
-                from gateway.status import release_scoped_lock
-                if getattr(self, '_token_lock_identity', None):
-                    release_scoped_lock('discord-bot-token', self._token_lock_identity)
-                    self._token_lock_identity = None
-            except Exception:
-                pass
+            self._release_platform_lock()
             return False
 
     async def disconnect(self) -> None:
@@ -719,20 +685,35 @@ class DiscordAdapter(BasePlatformAdapter):
             except Exception as e:  # pragma: no cover - defensive logging
                 logger.warning("[%s] Error during disconnect: %s", self.name, e, exc_info=True)
 
+        if self._post_connect_task and not self._post_connect_task.done():
+            self._post_connect_task.cancel()
+            try:
+                await self._post_connect_task
+            except asyncio.CancelledError:
+                pass
+
         self._running = False
         self._client = None
         self._ready_event.clear()
+        self._post_connect_task = None
 
-        # Release the token lock
-        try:
-            from gateway.status import release_scoped_lock
-            if getattr(self, '_token_lock_identity', None):
-                release_scoped_lock('discord-bot-token', self._token_lock_identity)
-                self._token_lock_identity = None
-        except Exception:
-            pass
+        self._release_platform_lock()
 
         logger.info("[%s] Disconnected", self.name)
+
+    async def _run_post_connect_initialization(self) -> None:
+        """Finish non-critical startup work after Discord is connected."""
+        if not self._client:
+            return
+        try:
+            synced = await asyncio.wait_for(self._client.tree.sync(), timeout=30)
+            logger.info("[%s] Synced %d slash command(s)", self.name, len(synced))
+        except asyncio.TimeoutError:
+            logger.warning("[%s] Slash command sync timed out after 30s", self.name)
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # pragma: no cover - defensive logging
+            logger.warning("[%s] Slash command sync failed: %s", self.name, e, exc_info=True)
 
     async def _add_reaction(self, message: Any, emoji: str) -> bool:
         """Add an emoji reaction to a Discord message."""
@@ -1063,6 +1044,7 @@ class DiscordAdapter(BasePlatformAdapter):
         if task:
             task.cancel()
         self._voice_text_channels.pop(guild_id, None)
+        self._voice_sources.pop(guild_id, None)
 
     # Maximum seconds to wait for voice playback before giving up
     PLAYBACK_TIMEOUT = 120
@@ -1397,6 +1379,68 @@ class DiscordAdapter(BasePlatformAdapter):
             )
             return await super().send_image(chat_id, image_url, caption, reply_to)
 
+    async def send_animation(
+        self,
+        chat_id: str,
+        animation_url: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send an animated GIF natively as a Discord file attachment."""
+        if not self._client:
+            return SendResult(success=False, error="Not connected")
+
+        if not is_safe_url(animation_url):
+            logger.warning("[%s] Blocked unsafe animation URL during Discord send_animation", self.name)
+            return await super().send_animation(chat_id, animation_url, caption, reply_to, metadata=metadata)
+
+        try:
+            import aiohttp
+
+            channel = self._client.get_channel(int(chat_id))
+            if not channel:
+                channel = await self._client.fetch_channel(int(chat_id))
+            if not channel:
+                return SendResult(success=False, error=f"Channel {chat_id} not found")
+
+            # Download the GIF and send as a Discord file attachment
+            # (Discord renders .gif attachments as auto-playing animations inline)
+            from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
+            _proxy = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
+            _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
+            async with aiohttp.ClientSession(**_sess_kw) as session:
+                async with session.get(animation_url, timeout=aiohttp.ClientTimeout(total=30), **_req_kw) as resp:
+                    if resp.status != 200:
+                        raise Exception(f"Failed to download animation: HTTP {resp.status}")
+
+                    animation_data = await resp.read()
+
+                    import io
+                    file = discord.File(io.BytesIO(animation_data), filename="animation.gif")
+
+                    msg = await channel.send(
+                        content=caption if caption else None,
+                        file=file,
+                    )
+                    return SendResult(success=True, message_id=str(msg.id))
+
+        except ImportError:
+            logger.warning(
+                "[%s] aiohttp not installed, falling back to URL. Run: pip install aiohttp",
+                self.name,
+                exc_info=True,
+            )
+            return await super().send_animation(chat_id, animation_url, caption, reply_to, metadata=metadata)
+        except Exception as e:  # pragma: no cover - defensive logging
+            logger.error(
+                "[%s] Failed to send animation attachment, falling back to URL: %s",
+                self.name,
+                e,
+                exc_info=True,
+            )
+            return await super().send_animation(chat_id, animation_url, caption, reply_to, metadata=metadata)
+
     async def send_video(
         self,
         chat_id: str,
@@ -1714,6 +1758,10 @@ class DiscordAdapter(BasePlatformAdapter):
         async def slash_update(interaction: discord.Interaction):
             await self._run_simple_slash(interaction, "/update", "Update initiated~")
 
+        @tree.command(name="restart", description="Gracefully restart the Hermes gateway")
+        async def slash_restart(interaction: discord.Interaction):
+            await self._run_simple_slash(interaction, "/restart", "Restart requested~")
+
         @tree.command(name="approve", description="Approve a pending dangerous command")
         @discord.app_commands.describe(scope="Optional: 'all', 'session', 'always', 'all session', 'all always'")
         async def slash_approve(interaction: discord.Interaction, scope: str = ""):
@@ -1754,46 +1802,160 @@ class DiscordAdapter(BasePlatformAdapter):
         async def slash_btw(interaction: discord.Interaction, question: str):
             await self._run_simple_slash(interaction, f"/btw {question}")
 
-        # Register installed skills as native slash commands (parity with
-        # Telegram, which uses telegram_menu_commands() in commands.py).
-        # Discord allows up to 100 application commands globally.
-        _DISCORD_CMD_LIMIT = 100
+        # ── Auto-register any gateway-available commands not yet on the tree ──
+        # This ensures new commands added to COMMAND_REGISTRY in
+        # hermes_cli/commands.py automatically appear as Discord slash
+        # commands without needing a manual entry here.
         try:
-            from hermes_cli.commands import discord_skill_commands
+            from hermes_cli.commands import COMMAND_REGISTRY, _is_gateway_available, _resolve_config_gates
 
-            existing_names = {cmd.name for cmd in tree.get_commands()}
-            remaining_slots = max(0, _DISCORD_CMD_LIMIT - len(existing_names))
+            already_registered = set()
+            try:
+                already_registered = {cmd.name for cmd in tree.get_commands()}
+            except Exception:
+                pass
 
-            skill_entries, skipped = discord_skill_commands(
-                max_slots=remaining_slots,
+            config_overrides = _resolve_config_gates()
+
+            for cmd_def in COMMAND_REGISTRY:
+                if not _is_gateway_available(cmd_def, config_overrides):
+                    continue
+                # Discord command names: lowercase, hyphens OK, max 32 chars.
+                discord_name = cmd_def.name.lower()[:32]
+                if discord_name in already_registered:
+                    continue
+                # Skip aliases that overlap with already-registered names
+                # (aliases for explicitly registered commands are handled above).
+                desc = (cmd_def.description or f"Run /{cmd_def.name}")[:100]
+                has_args = bool(cmd_def.args_hint)
+
+                if has_args:
+                    # Command takes optional arguments — create handler with
+                    # an optional ``args`` string parameter.
+                    def _make_args_handler(_name: str, _hint: str):
+                        @discord.app_commands.describe(args=f"Arguments: {_hint}"[:100])
+                        async def _handler(interaction: discord.Interaction, args: str = ""):
+                            await self._run_simple_slash(
+                                interaction, f"/{_name} {args}".strip()
+                            )
+                        _handler.__name__ = f"auto_slash_{_name.replace('-', '_')}"
+                        return _handler
+
+                    handler = _make_args_handler(cmd_def.name, cmd_def.args_hint)
+                else:
+                    # Parameterless command.
+                    def _make_simple_handler(_name: str):
+                        async def _handler(interaction: discord.Interaction):
+                            await self._run_simple_slash(interaction, f"/{_name}")
+                        _handler.__name__ = f"auto_slash_{_name.replace('-', '_')}"
+                        return _handler
+
+                    handler = _make_simple_handler(cmd_def.name)
+
+                auto_cmd = discord.app_commands.Command(
+                    name=discord_name,
+                    description=desc,
+                    callback=handler,
+                )
+                try:
+                    tree.add_command(auto_cmd)
+                    already_registered.add(discord_name)
+                except Exception:
+                    # Silently skip commands that fail registration (e.g.
+                    # name conflict with a subcommand group).
+                    pass
+
+            logger.debug(
+                "Discord auto-registered %d commands from COMMAND_REGISTRY",
+                len(already_registered),
+            )
+        except Exception as e:
+            logger.warning("Discord auto-register from COMMAND_REGISTRY failed: %s", e)
+
+        # Register skills under a single /skill command group with category
+        # subcommand groups.  This uses 1 top-level slot instead of N,
+        # supporting up to 25 categories × 25 skills = 625 skills.
+        self._register_skill_group(tree)
+
+    def _register_skill_group(self, tree) -> None:
+        """Register a ``/skill`` command group with category subcommand groups.
+
+        Skills are organized by their directory category under ``SKILLS_DIR``.
+        Each category becomes a subcommand group; root-level skills become
+        direct subcommands.  Discord supports 25 subcommand groups × 25
+        subcommands each = 625 skills — well beyond the old 100-command cap.
+        """
+        try:
+            from hermes_cli.commands import discord_skill_commands_by_category
+
+            existing_names = set()
+            try:
+                existing_names = {cmd.name for cmd in tree.get_commands()}
+            except Exception:
+                pass
+
+            categories, uncategorized, hidden = discord_skill_commands_by_category(
                 reserved_names=existing_names,
             )
 
-            for discord_name, description, cmd_key in skill_entries:
-                # Closure factory to capture cmd_key per iteration
-                def _make_skill_handler(_key: str):
-                    async def _skill_slash(interaction: discord.Interaction, args: str = ""):
-                        await self._run_simple_slash(interaction, f"{_key} {args}".strip())
-                    return _skill_slash
+            if not categories and not uncategorized:
+                return
 
-                handler = _make_skill_handler(cmd_key)
-                handler.__name__ = f"skill_{discord_name.replace('-', '_')}"
+            skill_group = discord.app_commands.Group(
+                name="skill",
+                description="Run a Hermes skill",
+            )
 
+            # ── Helper: build a callback for a skill command key ──
+            def _make_handler(_key: str):
+                @discord.app_commands.describe(args="Optional arguments for the skill")
+                async def _handler(interaction: discord.Interaction, args: str = ""):
+                    await self._run_simple_slash(interaction, f"{_key} {args}".strip())
+                _handler.__name__ = f"skill_{_key.lstrip('/').replace('-', '_')}"
+                return _handler
+
+            # ── Uncategorized (root-level) skills → direct subcommands ──
+            for discord_name, description, cmd_key in uncategorized:
                 cmd = discord.app_commands.Command(
                     name=discord_name,
-                    description=description,
-                    callback=handler,
+                    description=description or f"Run the {discord_name} skill",
+                    callback=_make_handler(cmd_key),
                 )
-                discord.app_commands.describe(args="Optional arguments for the skill")(cmd)
-                tree.add_command(cmd)
+                skill_group.add_command(cmd)
 
-            if skipped:
+            # ── Category subcommand groups ──
+            for cat_name in sorted(categories):
+                cat_desc = f"{cat_name.replace('-', ' ').title()} skills"
+                if len(cat_desc) > 100:
+                    cat_desc = cat_desc[:97] + "..."
+                cat_group = discord.app_commands.Group(
+                    name=cat_name,
+                    description=cat_desc,
+                    parent=skill_group,
+                )
+                for discord_name, description, cmd_key in categories[cat_name]:
+                    cmd = discord.app_commands.Command(
+                        name=discord_name,
+                        description=description or f"Run the {discord_name} skill",
+                        callback=_make_handler(cmd_key),
+                    )
+                    cat_group.add_command(cmd)
+
+            tree.add_command(skill_group)
+
+            total = sum(len(v) for v in categories.values()) + len(uncategorized)
+            logger.info(
+                "[%s] Registered /skill group: %d skill(s) across %d categories"
+                " + %d uncategorized",
+                self.name, total, len(categories), len(uncategorized),
+            )
+            if hidden:
                 logger.warning(
-                    "[%s] Discord slash command limit reached (%d): %d skill(s) not registered",
-                    self.name, _DISCORD_CMD_LIMIT, skipped,
+                    "[%s] %d skill(s) not registered (Discord subcommand limits)",
+                    self.name, hidden,
                 )
         except Exception as exc:
-            logger.warning("[%s] Failed to register skill slash commands: %s", self.name, exc)
+            logger.warning("[%s] Failed to register /skill group: %s", self.name, exc)
 
     def _build_slash_event(self, interaction: discord.Interaction, text: str) -> MessageEvent:
         """Build a MessageEvent from a Discord slash command interaction."""
@@ -1830,11 +1992,14 @@ class DiscordAdapter(BasePlatformAdapter):
         )
 
         msg_type = MessageType.COMMAND if text.startswith("/") else MessageType.TEXT
+        channel_id = str(interaction.channel_id)
+        parent_id = str(getattr(getattr(interaction, "channel", None), "parent_id", "") or "")
         return MessageEvent(
             text=text,
             message_type=msg_type,
             source=source,
             raw_message=interaction,
+            channel_prompt=self._resolve_channel_prompt(channel_id, parent_id or None),
         )
 
     # ------------------------------------------------------------------
@@ -1870,7 +2035,7 @@ class DiscordAdapter(BasePlatformAdapter):
 
         # Track thread participation so follow-ups don't require @mention
         if thread_id:
-            self._track_thread(thread_id)
+            self._threads.mark(thread_id)
 
         # If a message was provided, kick off a new Hermes session in the thread
         starter = (message or "").strip()
@@ -1905,14 +2070,17 @@ class DiscordAdapter(BasePlatformAdapter):
             chat_topic=chat_topic,
         )
 
-        _parent_id = str(getattr(getattr(interaction, "channel", None), "parent_id", "") or "")
+        _parent_channel = self._thread_parent_channel(getattr(interaction, "channel", None))
+        _parent_id = str(getattr(_parent_channel, "id", "") or "")
         _skills = self._resolve_channel_skills(thread_id, _parent_id or None)
+        _channel_prompt = self._resolve_channel_prompt(thread_id, _parent_id or None)
         event = MessageEvent(
             text=text,
             message_type=MessageType.TEXT,
             source=source,
             raw_message=interaction,
             auto_skill=_skills,
+            channel_prompt=_channel_prompt,
         )
         await self.handle_message(event)
 
@@ -1940,6 +2108,11 @@ class DiscordAdapter(BasePlatformAdapter):
                 if isinstance(skills, list) and skills:
                     return list(dict.fromkeys(skills))  # dedup, preserve order
         return None
+
+    def _resolve_channel_prompt(self, channel_id: str, parent_id: str | None = None) -> str | None:
+        """Resolve a Discord per-channel prompt, preferring the exact channel over its parent."""
+        from gateway.platforms.base import resolve_channel_prompt
+        return resolve_channel_prompt(self.config.extra, channel_id, parent_id)
 
     def _thread_parent_channel(self, channel: Any) -> Any:
         """Return the parent text channel when invoked from a thread."""
@@ -2241,49 +2414,6 @@ class DiscordAdapter(BasePlatformAdapter):
             return f"{parent_name} / {thread_name}"
         return thread_name
 
-    # ------------------------------------------------------------------
-    # Thread participation persistence
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _thread_state_path() -> Path:
-        """Path to the persisted thread participation set."""
-        from hermes_cli.config import get_hermes_home
-        return get_hermes_home() / "discord_threads.json"
-
-    @classmethod
-    def _load_participated_threads(cls) -> set:
-        """Load persisted thread IDs from disk."""
-        path = cls._thread_state_path()
-        try:
-            if path.exists():
-                data = json.loads(path.read_text(encoding="utf-8"))
-                if isinstance(data, list):
-                    return set(data)
-        except Exception as e:
-            logger.debug("Could not load discord thread state: %s", e)
-        return set()
-
-    def _save_participated_threads(self) -> None:
-        """Persist the current thread set to disk (best-effort)."""
-        path = self._thread_state_path()
-        try:
-            # Trim to most recent entries if over cap
-            thread_list = list(self._bot_participated_threads)
-            if len(thread_list) > self._MAX_TRACKED_THREADS:
-                thread_list = thread_list[-self._MAX_TRACKED_THREADS:]
-                self._bot_participated_threads = set(thread_list)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(thread_list), encoding="utf-8")
-        except Exception as e:
-            logger.debug("Could not save discord thread state: %s", e)
-
-    def _track_thread(self, thread_id: str) -> None:
-        """Add a thread to the participation set and persist."""
-        if thread_id not in self._bot_participated_threads:
-            self._bot_participated_threads.add(thread_id)
-            self._save_participated_threads()
-
     async def _handle_message(self, message: DiscordMessage) -> None:
         """Handle incoming Discord messages."""
         # In server channels (not DMs), require the bot to be @mentioned
@@ -2305,6 +2435,7 @@ class DiscordAdapter(BasePlatformAdapter):
             thread_id = str(message.channel.id)
             parent_channel_id = self._get_parent_channel_id(message.channel)
 
+        is_voice_linked_channel = False
         if not isinstance(message.channel, discord.DMChannel):
             channel_ids = {str(message.channel.id)}
             if parent_channel_id:
@@ -2331,11 +2462,16 @@ class DiscordAdapter(BasePlatformAdapter):
                 channel_ids.add(parent_channel_id)
 
             require_mention = os.getenv("DISCORD_REQUIRE_MENTION", "true").lower() not in ("false", "0", "no")
-            is_free_channel = bool(channel_ids & free_channels)
+            # Voice-linked text channels act as free-response while voice is active.
+            # Only the exact bound channel gets the exemption, not sibling threads.
+            voice_linked_ids = {str(ch_id) for ch_id in self._voice_text_channels.values()}
+            current_channel_id = str(message.channel.id)
+            is_voice_linked_channel = current_channel_id in voice_linked_ids
+            is_free_channel = bool(channel_ids & free_channels) or is_voice_linked_channel
 
             # Skip the mention check if the message is in a thread where
             # the bot has previously participated (auto-created or replied in).
-            in_bot_thread = is_thread and thread_id in self._bot_participated_threads
+            in_bot_thread = is_thread and thread_id in self._threads
 
             if require_mention and not is_free_channel and not in_bot_thread:
                 if self._client.user not in message.mentions:
@@ -2355,13 +2491,13 @@ class DiscordAdapter(BasePlatformAdapter):
             no_thread_channels = {ch.strip() for ch in no_thread_channels_raw.split(",") if ch.strip()}
             skip_thread = bool(channel_ids & no_thread_channels)
             auto_thread = os.getenv("DISCORD_AUTO_THREAD", "true").lower() in ("true", "1", "yes")
-            if auto_thread and not skip_thread:
+            if auto_thread and not skip_thread and not is_voice_linked_channel:
                 thread = await self._auto_create_thread(message)
                 if thread:
                     is_thread = True
                     thread_id = str(thread.id)
                     auto_threaded_channel = thread
-                    self._track_thread(thread_id)
+                    self._threads.mark(thread_id)
 
         # Determine message type
         msg_type = MessageType.TEXT
@@ -2529,6 +2665,15 @@ class DiscordAdapter(BasePlatformAdapter):
         _parent_id = str(getattr(_chan, "parent_id", "") or "")
         _chan_id = str(getattr(_chan, "id", ""))
         _skills = self._resolve_channel_skills(_chan_id, _parent_id or None)
+        _channel_prompt = self._resolve_channel_prompt(_chan_id, _parent_id or None)
+
+        reply_to_id = None
+        reply_to_text = None
+        if message.reference:
+            reply_to_id = str(message.reference.message_id)
+            if message.reference.resolved:
+                reply_to_text = getattr(message.reference.resolved, "content", None) or None
+
         event = MessageEvent(
             text=event_text,
             message_type=msg_type,
@@ -2537,15 +2682,17 @@ class DiscordAdapter(BasePlatformAdapter):
             message_id=str(message.id),
             media_urls=media_urls,
             media_types=media_types,
-            reply_to_message_id=str(message.reference.message_id) if message.reference else None,
+            reply_to_message_id=reply_to_id,
+            reply_to_text=reply_to_text,
             timestamp=message.created_at,
             auto_skill=_skills,
+            channel_prompt=_channel_prompt,
         )
 
         # Track thread participation so the bot won't require @mention for
         # follow-up messages in threads it has already engaged in.
         if thread_id:
-            self._track_thread(thread_id)
+            self._threads.mark(thread_id)
 
         # Only batch plain text messages — commands, media, etc. dispatch
         # immediately since they won't be split by the Discord client.
