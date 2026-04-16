@@ -1,6 +1,18 @@
 """Tests for Anthropic OAuth setup flow behavior."""
 
+import os
+
+import pytest
+
 from hermes_cli.config import load_env, save_env_value
+
+
+@pytest.fixture(autouse=True)
+def _cleanup_leaked_anthropic_env():
+    """save_env_value writes to os.environ directly — ensure it doesn't leak across xdist tests."""
+    yield
+    for key in ("ANTHROPIC_TOKEN", "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"):
+        os.environ.pop(key, None)
 
 
 def test_run_anthropic_oauth_flow_prefers_claude_code_credentials(tmp_path, monkeypatch, capsys):

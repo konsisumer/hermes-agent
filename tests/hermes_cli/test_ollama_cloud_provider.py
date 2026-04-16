@@ -35,12 +35,17 @@ class TestOllamaCloudProviderRegistry:
 
 # ── Provider Aliases ──
 
-PROVIDER_ENV_VARS = (
-    "OPENROUTER_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY",
-    "GOOGLE_API_KEY", "GEMINI_API_KEY", "OLLAMA_API_KEY",
-    "GLM_API_KEY", "ZAI_API_KEY", "KIMI_API_KEY",
-    "MINIMAX_API_KEY", "DEEPSEEK_API_KEY",
-)
+def _all_provider_env_vars():
+    seen = set()
+    for pconfig in PROVIDER_REGISTRY.values():
+        for var in pconfig.api_key_env_vars:
+            seen.add(var)
+    seen.update({"OPENROUTER_API_KEY", "OPENAI_API_KEY"})
+    return tuple(sorted(seen))
+
+
+PROVIDER_ENV_VARS = _all_provider_env_vars()
+
 
 @pytest.fixture(autouse=True)
 def _clean_provider_env(monkeypatch):
