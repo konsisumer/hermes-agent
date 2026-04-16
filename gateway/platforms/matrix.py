@@ -729,6 +729,14 @@ class MatrixAdapter(BasePlatformAdapter):
             except Exception:
                 pass
 
+    async def stop_typing(self, chat_id: str) -> None:
+        """Stop the Matrix typing indicator."""
+        if self._client:
+            try:
+                await self._client.set_typing(RoomID(chat_id), timeout=0)
+            except Exception:
+                pass
+
     async def edit_message(
         self, chat_id: str, message_id: str, content: str
     ) -> SendResult:
@@ -1590,11 +1598,21 @@ class MatrixAdapter(BasePlatformAdapter):
         if not self._client:
             return False
         try:
-            await self._client.set_read_markers(
-                RoomID(room_id),
-                fully_read_event=EventID(event_id),
-                read_receipt=EventID(event_id),
-            )
+            room = RoomID(room_id)
+            event = EventID(event_id)
+            if hasattr(self._client, "set_fully_read_marker"):
+                await self._client.set_fully_read_marker(room, event, event)
+            elif hasattr(self._client, "send_receipt"):
+                await self._client.send_receipt(room, event)
+            elif hasattr(self._client, "set_read_markers"):
+                await self._client.set_read_markers(
+                    room,
+                    fully_read_event=event,
+                    read_receipt=event,
+                )
+            else:
+                logger.debug("Matrix: client has no read receipt method")
+                return False
             logger.debug("Matrix: sent read receipt for %s in %s", event_id, room_id)
             return True
         except Exception as exc:
