@@ -215,13 +215,13 @@ class TestResolveVisionProviderClientModelNormalization:
 
     def test_vision_auto_strips_matching_main_provider_prefix(self, tmp_path):
         _write_config(tmp_path, {
-            "model": {"default": "deepseek/deepseek-chat", "provider": "deepseek"},
+            "model": {"default": "zai/glm-5.1", "provider": "zai"},
         })
         with (
             patch("agent.auxiliary_client._read_nous_auth", return_value=None),
             patch("hermes_cli.auth.resolve_api_key_provider_credentials", return_value={
-                "api_key": "ds-key",
-                "base_url": "https://api.deepseek.com",
+                "api_key": "glm-key",
+                "base_url": "https://api.z.ai/api/paas/v4",
             }),
             patch("agent.auxiliary_client.OpenAI") as mock_openai,
         ):
@@ -230,7 +230,7 @@ class TestResolveVisionProviderClientModelNormalization:
 
             provider, client, model = resolve_vision_provider_client()
 
-        assert provider == "deepseek"
+        assert provider == "zai"
         assert client is not None
         assert model == "glm-5v-turbo"  # zai has dedicated vision model in _PROVIDER_VISION_MODELS
 
