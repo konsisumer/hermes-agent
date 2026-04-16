@@ -644,10 +644,12 @@ class TestPluginCommands:
         manifest = PluginManifest(name="test-plugin", source="user")
         ctx = PluginContext(manifest, mgr)
 
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.WARNING, logger="hermes_cli.plugins"):
             ctx.register_command("", lambda a: a)
         assert len(mgr._plugin_commands) == 0
-        assert "empty name" in caplog.text
+        assert any(
+            "empty name" in r.getMessage().lower() for r in caplog.records
+        )
 
     def test_register_command_builtin_conflict_rejected(self, caplog):
         """Commands that conflict with built-in names are rejected."""
@@ -655,10 +657,12 @@ class TestPluginCommands:
         manifest = PluginManifest(name="test-plugin", source="user")
         ctx = PluginContext(manifest, mgr)
 
-        with caplog.at_level(logging.WARNING):
+        with caplog.at_level(logging.WARNING, logger="hermes_cli.plugins"):
             ctx.register_command("help", lambda a: a)
         assert "help" not in mgr._plugin_commands
-        assert "conflicts" in caplog.text.lower()
+        assert any(
+            "conflicts" in r.getMessage().lower() for r in caplog.records
+        )
 
     def test_register_command_default_description(self):
         """Missing description defaults to 'Plugin command'."""
