@@ -55,15 +55,19 @@ class TestAtomicWritePermissions:
             os.umask(old)
         assert _file_mode(target) == 0o660
 
-    def test_json_overwrite_updates_permissions(self, tmp_path):
-        """When overwriting an existing file, permissions should reflect current umask."""
+    def test_json_overwrite_preserves_existing_mode(self, tmp_path):
+        """When overwriting an existing file, keep its prior permissions.
+
+        Matches the Docker/NAS policy from PR #10618: volume-mounted configs
+        with broader permissions (e.g. 0o666) must survive atomic rewrites.
+        """
         target = tmp_path / "out.json"
         target.write_text("{}")
-        target.chmod(0o600)
+        target.chmod(0o666)
 
         old = os.umask(0o022)
         try:
             atomic_json_write(target, {"updated": True})
         finally:
             os.umask(old)
-        assert _file_mode(target) == 0o644
+        assert _file_mode(target) == 0o666
