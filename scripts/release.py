@@ -64,7 +64,9 @@ AUTHOR_MAP = {
     "259807879+Bartok9@users.noreply.github.com": "Bartok9",
     "241404605+MestreY0d4-Uninter@users.noreply.github.com": "MestreY0d4-Uninter",
     "268667990+Roy-oss1@users.noreply.github.com": "Roy-oss1",
+    "27917469+nosleepcassette@users.noreply.github.com": "nosleepcassette",
     "241404605+MestreY0d4-Uninter@users.noreply.github.com": "MestreY0d4-Uninter",
+    "109555139+davetist@users.noreply.github.com": "davetist",
     # contributors (manual mapping from git names)
     "dmayhem93@gmail.com": "dmahan93",
     "samherring99@gmail.com": "samherring99",
@@ -177,6 +179,8 @@ AUTHOR_MAP = {
     "limars874@gmail.com": "limars874",
     "lisicheng168@gmail.com": "lesterli",
     "mingjwan@microsoft.com": "MagicRay1217",
+    "orangeko@gmail.com": "GenKoKo",
+    "82095453+iacker@users.noreply.github.com": "iacker",
     "niyant@spicefi.xyz": "spniyant",
     "olafthiele@gmail.com": "olafthiele",
     "oncuevtv@gmail.com": "sprmn24",
