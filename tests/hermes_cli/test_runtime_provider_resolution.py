@@ -1047,6 +1047,33 @@ def test_alibaba_anthropic_endpoint_override_uses_anthropic_messages(monkeypatch
     assert resolved["base_url"] == "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic"
 
 
+def test_alibaba_fallback_to_alibaba_api_key(monkeypatch):
+    """alibaba provider should accept ALIBABA_API_KEY when DASHSCOPE_API_KEY is absent."""
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "alibaba")
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {})
+    monkeypatch.delenv("DASHSCOPE_API_KEY", raising=False)
+    monkeypatch.setenv("ALIBABA_API_KEY", "test-alibaba-key")
+    monkeypatch.delenv("DASHSCOPE_BASE_URL", raising=False)
+
+    resolved = rp.resolve_runtime_provider(requested="alibaba")
+
+    assert resolved["provider"] == "alibaba"
+    assert resolved["api_key"] == "test-alibaba-key"
+
+
+def test_alibaba_dashscope_key_takes_precedence(monkeypatch):
+    """DASHSCOPE_API_KEY should take precedence over ALIBABA_API_KEY."""
+    monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "alibaba")
+    monkeypatch.setattr(rp, "_get_model_config", lambda: {})
+    monkeypatch.setenv("DASHSCOPE_API_KEY", "primary-key")
+    monkeypatch.setenv("ALIBABA_API_KEY", "fallback-key")
+    monkeypatch.delenv("DASHSCOPE_BASE_URL", raising=False)
+
+    resolved = rp.resolve_runtime_provider(requested="alibaba")
+
+    assert resolved["api_key"] == "primary-key"
+
+
 def test_opencode_zen_gpt_defaults_to_responses(monkeypatch):
     monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "opencode-zen")
     monkeypatch.setattr(rp, "_get_model_config", lambda: {"default": "gpt-5.4"})
