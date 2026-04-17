@@ -135,9 +135,18 @@ class TestApprovalHeartbeat:
             resolve_gateway_approval,
         )
 
-        register_gateway_notify(self.SESSION_KEY, lambda _payload: None)
+        # notify_cb fires only after the worker has added its entry to the
+        # gateway queue, so use it as the signal that the worker is parked
+        # in the wait loop. Without this, a slow first-call tirith import
+        # (observed ~800ms) makes resolve_gateway_approval race the worker
+        # and hit an empty queue — that race doesn't exist in production
+        # because a real user can only approve after the prompt notify is
+        # delivered.
+        worker_ready = threading.Event()
+        register_gateway_notify(
+            self.SESSION_KEY, lambda _payload: worker_ready.set()
+        )
 
-        start_time = time.monotonic()
         result_holder: dict = {}
 
         def _run_check():
@@ -148,9 +157,14 @@ class TestApprovalHeartbeat:
         thread = threading.Thread(target=_run_check, daemon=True)
         thread.start()
 
+        assert worker_ready.wait(timeout=10.0), (
+            "worker did not reach the wait loop within 10s"
+        )
+
         # Resolve almost immediately — the wait loop should return within
-        # its current 1s poll slice.
-        time.sleep(0.1)
+        # its current 1s poll slice. Measure from the resolve call so the
+        # assertion bounds user-visible responsiveness, not test setup.
+        start_time = time.monotonic()
         resolve_gateway_approval(self.SESSION_KEY, "once")
         thread.join(timeout=5)
         elapsed = time.monotonic() - start_time
