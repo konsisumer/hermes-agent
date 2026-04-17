@@ -248,6 +248,38 @@ class TestCommandBypassActiveSession:
             "/queue response was not sent back to the user"
         )
 
+    @pytest.mark.asyncio
+    async def test_btw_bypasses_guard(self):
+        """/btw must bypass so it runs as a parallel side question."""
+        adapter = _make_adapter()
+        sk = _session_key()
+        adapter._active_sessions[sk] = asyncio.Event()
+
+        await adapter.handle_message(_make_event("/btw what is this module?"))
+
+        assert sk not in adapter._pending_messages, (
+            "/btw was queued as a pending message instead of being dispatched"
+        )
+        assert any("handled:btw" in r for r in adapter.sent_responses), (
+            "/btw response was not sent back to the user"
+        )
+
+    @pytest.mark.asyncio
+    async def test_branch_bypasses_guard(self):
+        """/branch must bypass so it can fork the session immediately."""
+        adapter = _make_adapter()
+        sk = _session_key()
+        adapter._active_sessions[sk] = asyncio.Event()
+
+        await adapter.handle_message(_make_event("/branch experiment"))
+
+        assert sk not in adapter._pending_messages, (
+            "/branch was queued as a pending message instead of being dispatched"
+        )
+        assert any("handled:branch" in r for r in adapter.sent_responses), (
+            "/branch response was not sent back to the user"
+        )
+
 
 # ---------------------------------------------------------------------------
 # Tests: non-bypass messages still get queued
