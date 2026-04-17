@@ -7949,8 +7949,11 @@ class HermesCLI:
         # Sanitize surrogate characters that can arrive via clipboard paste from
         # rich-text editors (Google Docs, Word, etc.).  Lone surrogates are invalid
         # UTF-8 and crash JSON serialization in the OpenAI SDK.
+        # Also strip leaked bracketed-paste wrappers (ESC[200~ / ESC[201~) that can
+        # slip through prompt_toolkit on terminals with fast paste delivery.
         if isinstance(message, str):
-            from run_agent import _sanitize_surrogates
+            from run_agent import _sanitize_surrogates, _strip_bracketed_paste_markers
+            message = _strip_bracketed_paste_markers(message)
             message = _sanitize_surrogates(message)
 
         # Add user message to history
@@ -9163,11 +9166,14 @@ class HermesCLI:
             # Normalise line endings — Windows \r\n and old Mac \r both become \n
             # so the 5-line collapse threshold and display are consistent.
             pasted_text = pasted_text.replace('\r\n', '\n').replace('\r', '\n')
+            # Strip any leaked bracketed-paste wrappers so they never reach the
+            # buffer even if the terminal delivered them inside event.data.
+            from run_agent import _sanitize_surrogates, _strip_bracketed_paste_markers
+            pasted_text = _strip_bracketed_paste_markers(pasted_text)
             if _should_auto_attach_clipboard_image_on_paste(pasted_text) and self._try_attach_clipboard_image():
                 event.app.invalidate()
             if pasted_text:
                 # Sanitize surrogate characters (e.g. from Word/Google Docs paste) before writing
-                from run_agent import _sanitize_surrogates
                 pasted_text = _sanitize_surrogates(pasted_text)
                 line_count = pasted_text.count('\n')
                 buf = event.current_buffer
@@ -9298,7 +9304,17 @@ class HermesCLI:
                still batch newlines.  Alt+Enter only adds 1 newline per
                event so it never triggers this.
             """
-            text = buf.text
+            # Defensively strip leaked bracketed-paste markers before anything
+            # else so persisted paste files and tracked state never carry
+            # literal ESC[200~/201~ control sequences.
+            from run_agent import _strip_bracketed_paste_markers
+            raw = buf.text
+            cleaned = _strip_bracketed_paste_markers(raw)
+            if cleaned != raw:
+                buf.text = cleaned
+                buf.cursor_position = min(buf.cursor_position, len(cleaned))
+                return
+            text = raw
             chars_added = len(text) - _prev_text_len[0]
             _prev_text_len[0] = len(text)
             if _paste_just_collapsed[0]:

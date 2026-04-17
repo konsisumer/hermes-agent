@@ -386,6 +386,27 @@ def _sanitize_structure_surrogates(payload: Any) -> bool:
     return found
 
 
+# Matches real ESC[200~/201~ bracketed-paste markers as well as the visible
+# ``^[[200~`` / ``^[[201~`` caret-escape forms that terminals or tooling can
+# render when the raw ESC leaks through.
+_BRACKETED_PASTE_MARKER_RE = re.compile(r'(?:\x1b|\^\[)\[20[01]~')
+
+
+def _strip_bracketed_paste_markers(text: str) -> str:
+    """Strip leaked bracketed-paste wrappers from text.
+
+    prompt_toolkit's bracketed-paste parser (observed on 3.0.52) can degrade
+    into emitting literal ``ESC[200~`` / ``ESC[201~`` into the buffer if the
+    paste prefix is flushed mid-read — a terminal-specific timing edge case
+    reported on Ghostty.  This helper removes both raw escape-sequence and
+    caret-escape renderings defensively so nothing downstream (UI buffer,
+    persisted paste files, API payloads) carries the control sequences.
+    """
+    if '\x1b[200~' in text or '\x1b[201~' in text or '^[[20' in text:
+        return _BRACKETED_PASTE_MARKER_RE.sub('', text)
+    return text
+
+
 def _sanitize_messages_surrogates(messages: list) -> bool:
     """Sanitize surrogate characters from all string content in a messages list.
 
@@ -8710,9 +8731,13 @@ class AIAgent:
         # Sanitize surrogate characters from user input.  Clipboard paste from
         # rich-text editors (Google Docs, Word, etc.) can inject lone surrogates
         # that are invalid UTF-8 and crash JSON serialization in the OpenAI SDK.
+        # Also strip leaked bracketed-paste wrappers (ESC[200~/201~) that can
+        # bypass the TUI handler on terminals with fast paste delivery.
         if isinstance(user_message, str):
+            user_message = _strip_bracketed_paste_markers(user_message)
             user_message = _sanitize_surrogates(user_message)
         if isinstance(persist_user_message, str):
+            persist_user_message = _strip_bracketed_paste_markers(persist_user_message)
             persist_user_message = _sanitize_surrogates(persist_user_message)
 
         # Strip leaked <memory-context> blocks from user input.  When Honcho's
