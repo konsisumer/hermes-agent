@@ -51,7 +51,9 @@ from gateway.platforms.base import (
     ProcessingOutcome,
     SendResult,
     cache_image_from_url,
+    cache_image_from_bytes,
     cache_audio_from_url,
+    cache_audio_from_bytes,
     cache_document_from_bytes,
     SUPPORTED_DOCUMENT_TYPES,
 )
@@ -78,6 +80,41 @@ def _clean_discord_id(entry: str) -> str:
 def check_discord_requirements() -> bool:
     """Check if Discord dependencies are available."""
     return DISCORD_AVAILABLE
+
+
+def _build_allowed_mentions():
+    """Build Discord ``AllowedMentions`` with safe defaults, overridable via env.
+
+    Discord bots default to parsing ``@everyone``, ``@here``, role pings, and
+    user pings when ``allowed_mentions`` is unset on the client — any LLM
+    output or echoed user content that contains ``@everyone`` would therefore
+    ping the whole server. We explicitly deny ``@everyone`` and role pings
+    by default and keep user / replied-user pings enabled so normal
+    conversation still works.
+
+    Override via environment variables (or ``discord.allow_mentions.*`` in
+    config.yaml):
+
+        DISCORD_ALLOW_MENTION_EVERYONE      default false  — @everyone + @here
+        DISCORD_ALLOW_MENTION_ROLES         default false  — @role pings
+        DISCORD_ALLOW_MENTION_USERS         default true   — @user pings
+        DISCORD_ALLOW_MENTION_REPLIED_USER  default true   — reply-ping author
+    """
+    if not DISCORD_AVAILABLE:
+        return None
+
+    def _b(name: str, default: bool) -> bool:
+        raw = os.getenv(name, "").strip().lower()
+        if not raw:
+            return default
+        return raw in ("true", "1", "yes", "on")
+
+    return discord.AllowedMentions(
+        everyone=_b("DISCORD_ALLOW_MENTION_EVERYONE", False),
+        roles=_b("DISCORD_ALLOW_MENTION_ROLES", False),
+        users=_b("DISCORD_ALLOW_MENTION_USERS", True),
+        replied_user=_b("DISCORD_ALLOW_MENTION_REPLIED_USER", True),
+    )
 
 
 class VoiceReceiver:
@@ -556,10 +593,15 @@ class DiscordAdapter(BasePlatformAdapter):
             if proxy_url:
                 logger.info("[%s] Using proxy for Discord: %s", self.name, proxy_url)
 
-            # Create bot — proxy= for HTTP, connector= for SOCKS
+            # Create bot — proxy= for HTTP, connector= for SOCKS.
+            # allowed_mentions is set with safe defaults (no @everyone/roles)
+            # so LLM output or echoed user content can't ping the whole
+            # server; override per DISCORD_ALLOW_MENTION_* env vars or the
+            # discord.allow_mentions.* block in config.yaml.
             self._client = commands.Bot(
                 command_prefix="!",  # Not really used, we handle raw messages
                 intents=intents,
+                allowed_mentions=_build_allowed_mentions(),
                 **proxy_kwargs_for_bot(proxy_url),
             )
             adapter_self = self  # capture for closure
@@ -833,7 +875,10 @@ class DiscordAdapter(BasePlatformAdapter):
             if reply_to and self._reply_to_mode != "off":
                 try:
                     ref_msg = await channel.fetch_message(int(reply_to))
-                    reference = ref_msg
+                    if hasattr(ref_msg, "to_reference"):
+                        reference = ref_msg.to_reference(fail_if_not_exists=False)
+                    else:
+                        reference = ref_msg
                 except Exception as e:
                     logger.debug("Could not fetch reply-to message: %s", e)
 
@@ -851,14 +896,20 @@ class DiscordAdapter(BasePlatformAdapter):
                     err_text = str(e)
                     if (
                         chunk_reference is not None
-                        and "error code: 50035" in err_text
-                        and "Cannot reply to a system message" in err_text
+                        and (
+                            (
+                                "error code: 50035" in err_text
+                                and "Cannot reply to a system message" in err_text
+                            )
+                            or "error code: 10008" in err_text
+                        )
                     ):
                         logger.warning(
-                            "[%s] Reply target %s is a Discord system message; retrying send without reply reference",
+                            "[%s] Reply target %s rejected the reply reference; retrying send without reply reference",
                             self.name,
                             reply_to,
                         )
+                        reference = None
                         msg = await channel.send(
                             content=chunk,
                             reference=None,
@@ -2440,6 +2491,124 @@ class DiscordAdapter(BasePlatformAdapter):
             return f"{parent_name} / {thread_name}"
         return thread_name
 
+    # ------------------------------------------------------------------
+    # Attachment download helpers
+    #
+    # Discord attachments (images / audio / documents) are fetched via the
+    # authenticated bot session whenever the Attachment object exposes
+    # ``read()``. That sidesteps two classes of bug that hit the older
+    # plain-HTTP path:
+    #
+    #   1. ``cdn.discordapp.com`` URLs increasingly require bot auth on
+    #      download — unauthenticated httpx sees 403 Forbidden.
+    #      (issue #8242)
+    #   2. Some user environments (VPNs, corporate DNS, tunnels) resolve
+    #      ``cdn.discordapp.com`` to private-looking IPs that our
+    #      ``is_safe_url`` guard classifies as SSRF risks. Routing the
+    #      fetch through discord.py's own HTTP client handles DNS
+    #      internally so our guard isn't consulted for the attachment
+    #      path. (issue #6587)
+    #
+    # If ``att.read()`` is unavailable (unexpected object shape / test
+    # stub) or the bot session fetch fails, we fall back to the existing
+    # SSRF-gated URL downloaders. The fallback keeps defense-in-depth
+    # against any future Discord payload-schema drift that could slip a
+    # non-CDN URL into the ``att.url`` field. (issue #11345)
+    # ------------------------------------------------------------------
+
+    async def _read_attachment_bytes(self, att) -> Optional[bytes]:
+        """Read an attachment via discord.py's authenticated bot session.
+
+        Returns the raw bytes on success, or ``None`` if ``att`` doesn't
+        expose a callable ``read()`` or the read itself fails. Callers
+        should treat ``None`` as a signal to fall back to the URL-based
+        downloaders.
+        """
+        reader = getattr(att, "read", None)
+        if reader is None or not callable(reader):
+            return None
+        try:
+            return await reader()
+        except Exception as e:
+            logger.warning(
+                "[Discord] Authenticated attachment read failed for %s: %s",
+                getattr(att, "filename", None) or getattr(att, "url", "<unknown>"),
+                e,
+            )
+            return None
+
+    async def _cache_discord_image(self, att, ext: str) -> str:
+        """Cache a Discord image attachment to local disk.
+
+        Primary path: ``att.read()`` + ``cache_image_from_bytes``
+        (authenticated, no SSRF gate).
+
+        Fallback: ``cache_image_from_url`` (plain httpx, SSRF-gated).
+        """
+        raw_bytes = await self._read_attachment_bytes(att)
+        if raw_bytes is not None:
+            try:
+                return cache_image_from_bytes(raw_bytes, ext=ext)
+            except Exception as e:
+                logger.debug(
+                    "[Discord] cache_image_from_bytes rejected att.read() data; falling back to URL: %s",
+                    e,
+                )
+        return await cache_image_from_url(att.url, ext=ext)
+
+    async def _cache_discord_audio(self, att, ext: str) -> str:
+        """Cache a Discord audio attachment to local disk.
+
+        Primary path: ``att.read()`` + ``cache_audio_from_bytes``
+        (authenticated, no SSRF gate).
+
+        Fallback: ``cache_audio_from_url`` (plain httpx, SSRF-gated).
+        """
+        raw_bytes = await self._read_attachment_bytes(att)
+        if raw_bytes is not None:
+            try:
+                return cache_audio_from_bytes(raw_bytes, ext=ext)
+            except Exception as e:
+                logger.debug(
+                    "[Discord] cache_audio_from_bytes failed; falling back to URL: %s",
+                    e,
+                )
+        return await cache_audio_from_url(att.url, ext=ext)
+
+    async def _cache_discord_document(self, att, ext: str) -> bytes:
+        """Download a Discord document attachment and return the raw bytes.
+
+        Primary path: ``att.read()`` (authenticated, no SSRF gate).
+
+        Fallback: SSRF-gated ``aiohttp`` download. This closes the gap
+        where the old document path made raw ``aiohttp.ClientSession``
+        requests with no safety check (#11345). The caller is responsible
+        for passing the returned bytes to ``cache_document_from_bytes``
+        (and, where applicable, for injecting text content).
+        """
+        raw_bytes = await self._read_attachment_bytes(att)
+        if raw_bytes is not None:
+            return raw_bytes
+
+        # Fallback: SSRF-gated URL download.
+        if not is_safe_url(att.url):
+            raise ValueError(
+                f"Blocked unsafe attachment URL (SSRF protection): {att.url}"
+            )
+        import aiohttp
+        from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
+        _proxy = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
+        _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
+        async with aiohttp.ClientSession(**_sess_kw) as session:
+            async with session.get(
+                att.url,
+                timeout=aiohttp.ClientTimeout(total=30),
+                **_req_kw,
+            ) as resp:
+                if resp.status != 200:
+                    raise Exception(f"HTTP {resp.status}")
+                return await resp.read()
+
     async def _handle_message(self, message: DiscordMessage) -> None:
         """Handle incoming Discord messages."""
         # In server channels (not DMs), require the bot to be @mentioned
@@ -2593,7 +2762,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     ext = "." + content_type.split("/")[-1].split(";")[0]
                     if ext not in (".jpg", ".jpeg", ".png", ".gif", ".webp"):
                         ext = ".jpg"
-                    cached_path = await cache_image_from_url(att.url, ext=ext)
+                    cached_path = await self._cache_discord_image(att, ext)
                     media_urls.append(cached_path)
                     media_types.append(content_type)
                     print(f"[Discord] Cached user image: {cached_path}", flush=True)
@@ -2607,7 +2776,7 @@ class DiscordAdapter(BasePlatformAdapter):
                     ext = "." + content_type.split("/")[-1].split(";")[0]
                     if ext not in (".ogg", ".mp3", ".wav", ".webm", ".m4a"):
                         ext = ".ogg"
-                    cached_path = await cache_audio_from_url(att.url, ext=ext)
+                    cached_path = await self._cache_discord_audio(att, ext)
                     media_urls.append(cached_path)
                     media_types.append(content_type)
                     print(f"[Discord] Cached user audio: {cached_path}", flush=True)
@@ -2638,19 +2807,7 @@ class DiscordAdapter(BasePlatformAdapter):
                         )
                     else:
                         try:
-                            import aiohttp
-                            from gateway.platforms.base import resolve_proxy_url, proxy_kwargs_for_aiohttp
-                            _proxy = resolve_proxy_url(platform_env_var="DISCORD_PROXY")
-                            _sess_kw, _req_kw = proxy_kwargs_for_aiohttp(_proxy)
-                            async with aiohttp.ClientSession(**_sess_kw) as session:
-                                async with session.get(
-                                    att.url,
-                                    timeout=aiohttp.ClientTimeout(total=30),
-                                    **_req_kw,
-                                ) as resp:
-                                    if resp.status != 200:
-                                        raise Exception(f"HTTP {resp.status}")
-                                    raw_bytes = await resp.read()
+                            raw_bytes = await self._cache_discord_document(att, ext)
                             cached_path = cache_document_from_bytes(
                                 raw_bytes, att.filename or f"document{ext}"
                             )
