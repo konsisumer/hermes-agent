@@ -96,6 +96,68 @@ class TestHonchoDoctorConfigDetection:
         assert not doctor._honcho_is_configured_for_doctor()
 
 
+class TestStdoutUnicodeSafety:
+    """Doctor must not crash on consoles with limited encodings (e.g. Windows GBK, #7537)."""
+
+    def test_reconfigures_non_utf8_stream_to_utf8_replace(self, monkeypatch):
+        calls = []
+
+        class FakeStream:
+            encoding = "gbk"
+
+            def reconfigure(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(doctor_mod.sys, "stdout", FakeStream())
+        monkeypatch.setattr(doctor_mod.sys, "stderr", FakeStream())
+
+        doctor_mod._make_stdout_unicode_safe()
+
+        assert calls == [
+            {"encoding": "utf-8", "errors": "replace"},
+            {"encoding": "utf-8", "errors": "replace"},
+        ]
+
+    def test_utf8_stream_only_sets_errors_replace(self, monkeypatch):
+        calls = []
+
+        class FakeStream:
+            encoding = "UTF-8"
+
+            def reconfigure(self, **kwargs):
+                calls.append(kwargs)
+
+        monkeypatch.setattr(doctor_mod.sys, "stdout", FakeStream())
+        monkeypatch.setattr(doctor_mod.sys, "stderr", FakeStream())
+
+        doctor_mod._make_stdout_unicode_safe()
+
+        assert calls == [{"errors": "replace"}, {"errors": "replace"}]
+
+    def test_stream_without_reconfigure_is_skipped(self, monkeypatch):
+        class FakeStream:
+            encoding = "gbk"
+
+        # No reconfigure attribute — should not raise.
+        monkeypatch.setattr(doctor_mod.sys, "stdout", FakeStream())
+        monkeypatch.setattr(doctor_mod.sys, "stderr", FakeStream())
+
+        doctor_mod._make_stdout_unicode_safe()
+
+    def test_reconfigure_failure_is_swallowed(self, monkeypatch):
+        class FakeStream:
+            encoding = "gbk"
+
+            def reconfigure(self, **kwargs):
+                raise OSError("detached stream")
+
+        monkeypatch.setattr(doctor_mod.sys, "stdout", FakeStream())
+        monkeypatch.setattr(doctor_mod.sys, "stderr", FakeStream())
+
+        # Must not propagate the exception.
+        doctor_mod._make_stdout_unicode_safe()
+
+
 def test_run_doctor_sets_interactive_env_for_tool_checks(monkeypatch, tmp_path):
     """Doctor should present CLI-gated tools as available in CLI context."""
     project_root = tmp_path / "project"

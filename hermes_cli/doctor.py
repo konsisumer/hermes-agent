@@ -161,8 +161,31 @@ def _check_gateway_service_linger(issues: list[str]) -> None:
         check_warn("Could not verify systemd linger", f"({linger_detail})")
 
 
+def _make_stdout_unicode_safe() -> None:
+    """Prevent UnicodeEncodeError on consoles with limited encodings (e.g. Windows GBK).
+
+    Doctor prints emoji and box-drawing characters; on Python's default Windows
+    console encoding (GBK on zh-CN, cp1252 on others), encoding fails with
+    UnicodeEncodeError. Reconfigure stdout/stderr to replace unencodable chars
+    with '?' so the command never crashes on the first emoji. See issue #7537.
+    """
+    for stream in (sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if reconfigure is None:
+            continue
+        try:
+            encoding = (getattr(stream, "encoding", "") or "").lower()
+            if encoding.replace("-", "") == "utf8":
+                reconfigure(errors="replace")
+            else:
+                reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+
 def run_doctor(args):
     """Run diagnostic checks."""
+    _make_stdout_unicode_safe()
     should_fix = getattr(args, 'fix', False)
 
     # Doctor runs from the interactive CLI, so CLI-gated tool availability
