@@ -638,55 +638,27 @@ class TestPluginCommands:
         assert "mycmd" in mgr._plugin_commands
         assert "/MyCmd " not in mgr._plugin_commands
 
-    def test_register_command_empty_name_rejected(self, monkeypatch):
+    def test_register_command_empty_name_rejected(self, caplog):
         """Empty name after normalization is rejected with a warning."""
-        from hermes_cli import plugins as plugins_mod
-
         mgr = PluginManager()
         manifest = PluginManifest(name="test-plugin", source="user")
         ctx = PluginContext(manifest, mgr)
 
-        # Patch logger.warning directly — caplog is flaky under xdist
-        # worker logger-level ordering on CI (see test_plugin_skills.py).
-        warnings_seen: list[str] = []
-        original = plugins_mod.logger.warning
-
-        def _capture(msg, *args, **kwargs):
-            try:
-                warnings_seen.append((msg % args) if args else str(msg))
-            except Exception:
-                warnings_seen.append(str(msg))
-            return original(msg, *args, **kwargs)
-
-        monkeypatch.setattr(plugins_mod.logger, "warning", _capture)
-
-        ctx.register_command("", lambda a: a)
+        with caplog.at_level(logging.WARNING, logger="hermes_cli.plugins"):
+            ctx.register_command("", lambda a: a)
         assert len(mgr._plugin_commands) == 0
-        assert any("empty name" in w for w in warnings_seen)
+        assert "empty name" in caplog.text
 
-    def test_register_command_builtin_conflict_rejected(self, monkeypatch):
+    def test_register_command_builtin_conflict_rejected(self, caplog):
         """Commands that conflict with built-in names are rejected."""
-        from hermes_cli import plugins as plugins_mod
-
         mgr = PluginManager()
         manifest = PluginManifest(name="test-plugin", source="user")
         ctx = PluginContext(manifest, mgr)
 
-        warnings_seen: list[str] = []
-        original = plugins_mod.logger.warning
-
-        def _capture(msg, *args, **kwargs):
-            try:
-                warnings_seen.append((msg % args) if args else str(msg))
-            except Exception:
-                warnings_seen.append(str(msg))
-            return original(msg, *args, **kwargs)
-
-        monkeypatch.setattr(plugins_mod.logger, "warning", _capture)
-
-        ctx.register_command("help", lambda a: a)
+        with caplog.at_level(logging.WARNING, logger="hermes_cli.plugins"):
+            ctx.register_command("help", lambda a: a)
         assert "help" not in mgr._plugin_commands
-        assert any("conflicts" in w.lower() for w in warnings_seen)
+        assert "conflicts" in caplog.text.lower()
 
     def test_register_command_default_description(self):
         """Missing description defaults to 'Plugin command'."""
