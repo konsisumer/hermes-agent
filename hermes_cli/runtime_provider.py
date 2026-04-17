@@ -539,10 +539,16 @@ def _resolve_explicit_runtime(
     if provider == "anthropic":
         cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
         cfg_base_url = ""
+        cfg_api_key = ""
         if cfg_provider == "anthropic":
             cfg_base_url = str(model_cfg.get("base_url") or "").strip().rstrip("/")
+            for k in ("api_key", "api"):
+                v = model_cfg.get(k)
+                if isinstance(v, str) and has_usable_secret(v):
+                    cfg_api_key = v.strip()
+                    break
         base_url = explicit_base_url or cfg_base_url or "https://api.anthropic.com"
-        api_key = explicit_api_key
+        api_key = explicit_api_key or cfg_api_key
         if not api_key:
             from agent.anthropic_adapter import resolve_anthropic_token
 
@@ -843,27 +849,38 @@ def resolve_runtime_provider(
 
     # Anthropic (native Messages API)
     if provider == "anthropic":
-        from agent.anthropic_adapter import resolve_anthropic_token
-        token = resolve_anthropic_token()
-        if not token:
-            raise AuthError(
-                "No Anthropic credentials found. Set ANTHROPIC_TOKEN or ANTHROPIC_API_KEY, "
-                "run 'claude setup-token', or authenticate with 'claude /login'."
-            )
-        # Allow base URL override from config.yaml model.base_url, but only
-        # when the configured provider is anthropic — otherwise a non-Anthropic
-        # base_url (e.g. Codex endpoint) would leak into Anthropic requests.
+        # Allow base URL and api_key override from config.yaml, but only when
+        # the configured provider is anthropic — otherwise a non-Anthropic
+        # base_url (e.g. Codex endpoint) or unrelated api_key would leak into
+        # Anthropic requests.
         cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
         cfg_base_url = ""
+        cfg_api_key = ""
         if cfg_provider == "anthropic":
             cfg_base_url = (model_cfg.get("base_url") or "").strip().rstrip("/")
+            for k in ("api_key", "api"):
+                v = model_cfg.get(k)
+                if isinstance(v, str) and has_usable_secret(v):
+                    cfg_api_key = v.strip()
+                    break
+        token = cfg_api_key
+        source = "config" if token else "env"
+        if not token:
+            from agent.anthropic_adapter import resolve_anthropic_token
+            token = resolve_anthropic_token()
+        if not token:
+            raise AuthError(
+                "No Anthropic credentials found. Set model.api_key in config.yaml, "
+                "set ANTHROPIC_TOKEN or ANTHROPIC_API_KEY, "
+                "run 'claude setup-token', or authenticate with 'claude /login'."
+            )
         base_url = cfg_base_url or "https://api.anthropic.com"
         return {
             "provider": "anthropic",
             "api_mode": "anthropic_messages",
             "base_url": base_url,
             "api_key": token,
-            "source": "env",
+            "source": source,
             "requested_provider": requested_provider,
         }
 
