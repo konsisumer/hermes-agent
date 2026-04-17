@@ -34,6 +34,7 @@ import logging
 import os
 import platform
 import shlex
+import shutil
 import signal
 import subprocess
 import threading
@@ -283,6 +284,37 @@ class ProcessRegistry:
     # ----- Spawn -----
 
     @staticmethod
+    def _get_terminal_dimensions() -> tuple:
+        """Best-effort PTY size as (rows, columns).
+
+        Prefer COLUMNS/LINES from the current environment when both are valid
+        positive integers, then shutil.get_terminal_size(), then fall back to
+        the historical (30, 120) default.
+        """
+        def _positive(value: Optional[str]) -> Optional[int]:
+            if not value:
+                return None
+            try:
+                n = int(value)
+            except (TypeError, ValueError):
+                return None
+            return n if n > 0 else None
+
+        cols = _positive(os.environ.get("COLUMNS"))
+        rows = _positive(os.environ.get("LINES"))
+        if rows and cols:
+            return (rows, cols)
+
+        try:
+            size = shutil.get_terminal_size(fallback=(0, 0))
+            if size.columns > 0 and size.lines > 0:
+                return (size.lines, size.columns)
+        except (OSError, ValueError):
+            pass
+
+        return (30, 120)
+
+    @staticmethod
     def _env_temp_dir(env: Any) -> str:
         """Return the writable sandbox temp dir for env-backed background tasks."""
         get_temp_dir = getattr(env, "get_temp_dir", None)
@@ -333,11 +365,14 @@ class ProcessRegistry:
                 user_shell = _find_shell()
                 pty_env = _sanitize_subprocess_env(os.environ, env_vars)
                 pty_env["PYTHONUNBUFFERED"] = "1"
+                rows, cols = self._get_terminal_dimensions()
+                pty_env["LINES"] = str(rows)
+                pty_env["COLUMNS"] = str(cols)
                 pty_proc = _PtyProcessCls.spawn(
                     [user_shell, "-lic", f"set +m; {command}"],
                     cwd=session.cwd,
                     env=pty_env,
-                    dimensions=(30, 120),
+                    dimensions=(rows, cols),
                 )
                 session.pid = pty_proc.pid
                 # Store the pty handle on the session for read/write

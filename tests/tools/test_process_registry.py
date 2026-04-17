@@ -403,6 +403,71 @@ class TestSpawnEnvSanitization:
 
 
 # =========================================================================
+# PTY terminal dimensions (issue #7321)
+# =========================================================================
+
+class TestPtyTerminalDimensions:
+    def test_prefers_columns_lines_env(self, registry, monkeypatch):
+        monkeypatch.setenv("COLUMNS", "160")
+        monkeypatch.setenv("LINES", "45")
+        assert registry._get_terminal_dimensions() == (45, 160)
+
+    def test_ignores_non_positive_env_values(self, registry, monkeypatch):
+        monkeypatch.setenv("COLUMNS", "0")
+        monkeypatch.setenv("LINES", "not-a-number")
+        with patch(
+            "tools.process_registry.shutil.get_terminal_size",
+            return_value=os.terminal_size((200, 50)),
+        ):
+            assert registry._get_terminal_dimensions() == (50, 200)
+
+    def test_falls_back_to_default_when_all_sources_invalid(
+        self, registry, monkeypatch
+    ):
+        monkeypatch.delenv("COLUMNS", raising=False)
+        monkeypatch.delenv("LINES", raising=False)
+        with patch(
+            "tools.process_registry.shutil.get_terminal_size",
+            return_value=os.terminal_size((0, 0)),
+        ):
+            assert registry._get_terminal_dimensions() == (30, 120)
+
+    def test_spawn_local_pty_sets_columns_lines_and_dimensions(
+        self, registry, monkeypatch
+    ):
+        from types import SimpleNamespace
+
+        captured = {}
+        fake_thread = MagicMock()
+
+        class FakePty:
+            pid = 4242
+
+            @classmethod
+            def spawn(cls, cmd, **kwargs):
+                captured["cmd"] = cmd
+                captured.update(kwargs)
+                return cls()
+
+        monkeypatch.setitem(
+            sys.modules, "ptyprocess", SimpleNamespace(PtyProcess=FakePty)
+        )
+        monkeypatch.setattr(registry, "_get_terminal_dimensions", lambda: (50, 180))
+
+        with (
+            patch("tools.process_registry._find_shell", return_value="/bin/bash"),
+            patch("threading.Thread", return_value=fake_thread),
+            patch.object(registry, "_write_checkpoint"),
+        ):
+            session = registry.spawn_local("echo hi", cwd="/tmp", use_pty=True)
+
+        assert session.pid == 4242
+        assert captured["dimensions"] == (50, 180)
+        assert captured["env"]["LINES"] == "50"
+        assert captured["env"]["COLUMNS"] == "180"
+
+
+# =========================================================================
 # Checkpoint
 # =========================================================================
 
