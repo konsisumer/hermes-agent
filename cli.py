@@ -4849,8 +4849,17 @@ class HermesCLI:
         )
         from hermes_cli.auth import resolve_provider as _resolve_provider
 
+        # Prefer the agent's live model/provider — _try_activate_fallback()
+        # mutates agent.model / agent.provider in place, while self.model
+        # and self.provider still reflect the originally configured primary.
+        # Without this the "Current:" line keeps showing the primary model
+        # after fallback has taken over the session.
+        agent = getattr(self, "agent", None)
+        active_model = (getattr(agent, "model", None) or self.model or "")
+        active_provider_raw = (getattr(agent, "provider", None) or self.provider or "")
+
         # Resolve current provider
-        raw_provider = normalize_provider(self.provider)
+        raw_provider = normalize_provider(active_provider_raw)
         if raw_provider == "auto":
             try:
                 current = _resolve_provider(
@@ -4864,7 +4873,9 @@ class HermesCLI:
             current = raw_provider
         current_label = _PROVIDER_LABELS.get(current, current)
 
-        print(f"\n  Current: {self.model} via {current_label}")
+        print(f"\n  Current: {active_model} via {current_label}")
+        if self.model and active_model and active_model != self.model:
+            print(f"  (configured primary: {self.model} — fallback active)")
         print()
 
         # Show all authenticated providers with their models
@@ -4882,12 +4893,12 @@ class HermesCLI:
                 # Fetch pricing for providers that support it (openrouter, nous)
                 pricing_map = get_pricing_for_provider(p["id"]) if p["id"] in ("openrouter", "nous") else {}
                 if curated and pricing_map:
-                    cur_model = self.model if is_active else ""
+                    cur_model = active_model if is_active else ""
                     for line in format_model_pricing_table(curated, pricing_map, current_model=cur_model):
                         print(line)
                 elif curated:
                     for mid, desc in curated:
-                        current_marker = " ← current" if (is_active and mid == self.model) else ""
+                        current_marker = " ← current" if (is_active and mid == active_model) else ""
                         print(f"      {mid}{current_marker}")
                 elif p["id"] == "custom":
                     from hermes_cli.models import _get_custom_base_url
@@ -4895,7 +4906,7 @@ class HermesCLI:
                     if custom_url:
                         print(f"      endpoint: {custom_url}")
                     if is_active:
-                        print(f"      model: {self.model} ← current")
+                        print(f"      model: {active_model} ← current")
                     print("      (use hermes model to change)")
                 else:
                     print("      (use hermes model to change)")
