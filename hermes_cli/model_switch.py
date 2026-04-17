@@ -1039,6 +1039,12 @@ def list_authenticated_providers(
         for ep_name, ep_cfg in user_providers.items():
             if not isinstance(ep_cfg, dict):
                 continue
+            # Skip if already emitted by Sections 1/2/2b under the same slug
+            # (e.g. config.yaml `providers: nous:` overlaps with built-in
+            # "Nous Portal"). Without this, the picker shows both the
+            # curated entry and an empty "nous (0)" duplicate (#7524).
+            if ep_name.lower() in seen_slugs:
+                continue
             display_name = ep_cfg.get("name", "") or ep_name
             api_url = ep_cfg.get("api", "") or ep_cfg.get("url", "") or ""
             default_model = ep_cfg.get("default_model", "")
@@ -1066,6 +1072,7 @@ def list_authenticated_providers(
                 "source": "user-config",
                 "api_url": api_url,
             })
+            seen_slugs.add(ep_name.lower())
 
     # --- 4. Saved custom providers from config ---
     # Each ``custom_providers`` entry represents one model under a named

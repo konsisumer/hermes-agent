@@ -86,6 +86,34 @@ def test_list_authenticated_providers_dedupes_models_when_default_in_list(monkey
     assert user_prov["models"].count("model-a") == 1, "model-a should not be duplicated"
 
 
+def test_list_authenticated_providers_dedupes_user_providers_against_builtins(monkeypatch):
+    """Regression for #7524: a provider key that also exists in the built-in
+    catalog (Sections 1/2) must not produce a second empty entry from
+    Section 3. Prior to the fix, having ``deepseek:`` in config.yaml
+    ``providers:`` while ``DEEPSEEK_API_KEY`` was set produced both the
+    curated ``DeepSeek`` row and an empty ``deepseek (0)`` duplicate."""
+    # Use deepseek: it's in Section 1 (PROVIDER_TO_MODELS_DEV) with a plain
+    # env-var creds check, so we can reliably simulate it.
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "fake-deepseek-key")
+
+    providers = list_authenticated_providers(
+        current_provider="deepseek",
+        user_providers={"deepseek": {"allowed_models": ["deepseek-chat"]}},
+        custom_providers=[],
+        max_models=50,
+    )
+
+    slugs = [p["slug"] for p in providers]
+    assert len(slugs) == len(set(slugs)), (
+        f"duplicate slugs found: {[s for s in slugs if slugs.count(s) > 1]}"
+    )
+
+    deepseek_rows = [p for p in providers if p["slug"] == "deepseek"]
+    assert len(deepseek_rows) == 1, f"expected one 'deepseek' row, got {len(deepseek_rows)}"
+    # Built-in row wins — user-config row (is_user_defined) must be absent.
+    assert not deepseek_rows[0]["is_user_defined"]
+
+
 def test_list_authenticated_providers_fallback_to_default_only(monkeypatch):
     """When no models array is provided, should fall back to default_model."""
     monkeypatch.setattr("agent.models_dev.fetch_models_dev", lambda: {})
