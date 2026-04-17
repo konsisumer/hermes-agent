@@ -8679,7 +8679,15 @@ class AIAgent:
         if self._memory_manager:
             try:
                 _turn_msg = original_user_message if isinstance(original_user_message, str) else ""
-                self._memory_manager.on_turn_start(self._user_turn_count, _turn_msg)
+                _turn_kwargs: Dict[str, Any] = {}
+                if self._session_db:
+                    try:
+                        _cur_title = self._session_db.get_session_title(self.session_id)
+                        if _cur_title:
+                            _turn_kwargs["session_title"] = _cur_title
+                    except Exception:
+                        pass
+                self._memory_manager.on_turn_start(self._user_turn_count, _turn_msg, **_turn_kwargs)
             except Exception:
                 pass
 
@@ -11466,7 +11474,15 @@ class AIAgent:
         # injected skill content that bloats / breaks provider queries.
         if self._memory_manager and final_response and original_user_message:
             try:
-                self._memory_manager.sync_all(original_user_message, final_response)
+                _sync_kwargs: Dict[str, Any] = {}
+                if self._session_db:
+                    try:
+                        _cur_title = self._session_db.get_session_title(self.session_id)
+                        if _cur_title:
+                            _sync_kwargs["session_title"] = _cur_title
+                    except Exception:
+                        pass
+                self._memory_manager.sync_all(original_user_message, final_response, **_sync_kwargs)
                 self._memory_manager.queue_prefetch_all(original_user_message)
             except Exception:
                 pass

@@ -21,9 +21,11 @@ class FakeMemoryProvider(MemoryProvider):
         self._tools = tools or []
         self.initialized = False
         self.synced_turns = []
+        self.sync_turn_kwargs = []
         self.prefetch_queries = []
         self.queued_prefetches = []
         self.turn_starts = []
+        self.turn_start_kwargs = []
         self.session_end_called = False
         self.pre_compress_called = False
         self.memory_writes = []
@@ -52,8 +54,9 @@ class FakeMemoryProvider(MemoryProvider):
     def queue_prefetch(self, query, *, session_id=""):
         self.queued_prefetches.append(query)
 
-    def sync_turn(self, user_content, assistant_content, *, session_id=""):
+    def sync_turn(self, user_content, assistant_content, *, session_id="", **kwargs):
         self.synced_turns.append((user_content, assistant_content))
+        self.sync_turn_kwargs.append(kwargs)
 
     def get_tool_schemas(self):
         return self._tools
@@ -64,8 +67,9 @@ class FakeMemoryProvider(MemoryProvider):
     def shutdown(self):
         self.shutdown_called = True
 
-    def on_turn_start(self, turn_number, message):
+    def on_turn_start(self, turn_number, message, **kwargs):
         self.turn_starts.append((turn_number, message))
+        self.turn_start_kwargs.append(kwargs)
 
     def on_session_end(self, messages):
         self.session_end_called = True
@@ -304,6 +308,24 @@ class TestMemoryManager:
         mgr.add_provider(p)
         mgr.on_turn_start(3, "hello")
         assert p.turn_starts == [(3, "hello")]
+
+    def test_on_turn_start_forwards_session_title(self):
+        """session_title kwarg reaches providers so they can scope by topic."""
+        mgr = MemoryManager()
+        p = FakeMemoryProvider("p")
+        mgr.add_provider(p)
+        mgr.on_turn_start(1, "hi", session_title="Debugging NVIDIA NIM")
+        assert p.turn_starts == [(1, "hi")]
+        assert p.turn_start_kwargs == [{"session_title": "Debugging NVIDIA NIM"}]
+
+    def test_sync_all_forwards_session_title(self):
+        """session_title kwarg reaches providers via sync_turn."""
+        mgr = MemoryManager()
+        p = FakeMemoryProvider("p")
+        mgr.add_provider(p)
+        mgr.sync_all("u", "a", session_title="Trip planning")
+        assert p.synced_turns == [("u", "a")]
+        assert p.sync_turn_kwargs == [{"session_title": "Trip planning"}]
 
     def test_on_session_end(self):
         mgr = MemoryManager()

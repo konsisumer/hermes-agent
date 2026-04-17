@@ -111,11 +111,16 @@ class MemoryProvider(ABC):
         that do background prefetching should override this.
         """
 
-    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
+    def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "", **kwargs) -> None:
         """Persist a completed turn to the backend.
 
         Called after each turn. Should be non-blocking — queue for
         background processing if the backend has latency.
+
+        kwargs may include:
+          - session_title (str): Current session title, if one has been set
+            or auto-generated. Providers that scope memories by conversation
+            topic can use this to tag or route writes.
         """
 
     @abstractmethod
@@ -146,8 +151,11 @@ class MemoryProvider(ABC):
 
         Use for turn-counting, scope management, periodic maintenance.
 
-        kwargs may include: remaining_tokens, model, platform, tool_count.
-        Providers use what they need; extras are ignored.
+        kwargs may include: remaining_tokens, model, platform, tool_count,
+        session_title. Providers use what they need; extras are ignored.
+        session_title reflects the title at the start of the turn — it may
+        change later in the same turn (e.g. when auto-titling completes
+        after the first response).
         """
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:

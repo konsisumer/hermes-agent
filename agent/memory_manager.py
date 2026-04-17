@@ -207,11 +207,15 @@ class MemoryManager:
 
     # -- Sync ----------------------------------------------------------------
 
-    def sync_all(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        """Sync a completed turn to all providers."""
+    def sync_all(self, user_content: str, assistant_content: str, *, session_id: str = "", **kwargs) -> None:
+        """Sync a completed turn to all providers.
+
+        kwargs are forwarded to each provider's sync_turn() — e.g.
+        ``session_title`` lets providers tag writes with the current title.
+        """
         for provider in self._providers:
             try:
-                provider.sync_turn(user_content, assistant_content, session_id=session_id)
+                provider.sync_turn(user_content, assistant_content, session_id=session_id, **kwargs)
             except Exception as e:
                 logger.warning(
                     "Memory provider '%s' sync_turn failed: %s",
