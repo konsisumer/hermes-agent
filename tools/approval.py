@@ -12,10 +12,12 @@ import contextvars
 import logging
 import os
 import re
+import shlex
 import sys
 import threading
 import time
 import unicodedata
+from pathlib import Path
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -190,12 +192,183 @@ def detect_dangerous_command(command: str) -> tuple:
     Returns:
         (is_dangerous, pattern_key, description) or (False, None, None)
     """
-    command_lower = _normalize_command_for_detection(command).lower()
+    command_normalized = _normalize_command_for_detection(command)
+    command_lower = command_normalized.lower()
     for pattern, description in DANGEROUS_PATTERNS:
         if re.search(pattern, command_lower, re.IGNORECASE | re.DOTALL):
             pattern_key = description
             return (True, pattern_key, description)
+
+    # Structural check: parse the command and flag venv-creating invocations
+    # whose target path resolves to the agent's running runtime. `uv venv`,
+    # `python -m venv`, and `virtualenv` all silently replace the target
+    # directory, so pointing them at sys.prefix wipes the live site-packages
+    # and kills the agent mid-session (issue #7779).
+    venv_desc = _detect_self_venv_mutation(command_normalized)
+    if venv_desc:
+        return (True, _VENV_MUTATION_KEY, venv_desc)
+
     return (False, None, None)
+
+
+# =========================================================================
+# Self-venv mutation detection (structural, path-aware)
+# =========================================================================
+
+_VENV_MUTATION_KEY = "self-venv mutation (would destroy running runtime)"
+
+_SHELL_OPERATORS = {";", "&&", "||", "|", "&"}
+_COMMAND_WRAPPERS = {"sudo", "nice", "nohup", "command", "exec", "time"}
+
+
+def _tokenize_shell(command: str) -> Optional[list[str]]:
+    """Tokenize a shell command honoring quotes and operator punctuation.
+
+    Uses shlex with punctuation_chars so that operators like ``&&``, ``||``,
+    ``;`` are returned as distinct tokens instead of glued to adjacent
+    words. Returns None when the string is not valid shell syntax (e.g.
+    unbalanced quotes) so callers can skip the check cleanly.
+    """
+    try:
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        return list(lexer)
+    except ValueError:
+        return None
+
+
+def _split_on_operators(tokens: list[str]) -> list[list[str]]:
+    """Split a token stream on shell operators into sub-argv chunks."""
+    parts: list[list[str]] = []
+    current: list[str] = []
+    for tok in tokens:
+        if tok in _SHELL_OPERATORS:
+            if current:
+                parts.append(current)
+                current = []
+        else:
+            current.append(tok)
+    if current:
+        parts.append(current)
+    return parts
+
+
+def _strip_command_wrappers(argv: list[str]) -> list[str]:
+    """Drop leading wrappers (sudo, env VAR=VAL, nice, etc.) from argv."""
+    i = 0
+    while i < len(argv):
+        tok = argv[i]
+        if tok in _COMMAND_WRAPPERS:
+            i += 1
+            while i < len(argv) and argv[i].startswith("-"):
+                i += 1
+            continue
+        if tok == "env":
+            i += 1
+            while i < len(argv) and "=" in argv[i] and not argv[i].startswith("-"):
+                i += 1
+            continue
+        break
+    return argv[i:]
+
+
+def _venv_creation_targets(argv: list[str]) -> list[str]:
+    """Return the target path(s) if argv invokes a venv-creating command.
+
+    Handles ``uv venv [path]``, ``python[23]? -m venv <path>``, and
+    ``virtualenv <path>``. Flags attached via ``=`` (e.g. ``--python=3.11``)
+    are treated as flags, not positional arguments.
+    """
+    if not argv:
+        return []
+    cmd = argv[0]
+    rest = argv[1:]
+
+    def _positional(tokens: list[str]) -> list[str]:
+        return [t for t in tokens if not t.startswith("-")]
+
+    if cmd == "uv" and rest and rest[0] == "venv":
+        positional = _positional(rest[1:])
+        # `uv venv` with no positional defaults to ".venv".
+        return [positional[0] if positional else ".venv"]
+
+    if re.match(r"^python[23]?(?:\.\d+)?$", cmd):
+        for j, tok in enumerate(rest):
+            if tok == "-m" and j + 1 < len(rest) and rest[j + 1] == "venv":
+                remaining_positional = _positional(rest[j + 2:])
+                return remaining_positional[:1]
+        return []
+
+    if cmd == "virtualenv":
+        positional = _positional(rest)
+        return positional[:1]
+
+    return []
+
+
+def _resolves_into_runtime(target: str, runtime: Path, base_cwd: Path) -> bool:
+    """Return True when target resolves to, into, or over the runtime path.
+
+    Resolves ~/environment-variables, then treats relative paths as
+    relative to base_cwd (best-effort — the agent process and terminal
+    typically share a cwd in the scenarios that trigger this bug). A
+    match covers three cases that would all destroy the runtime:
+    target == runtime, target lies inside runtime, or target is an
+    ancestor of runtime.
+    """
+    try:
+        expanded = os.path.expandvars(os.path.expanduser(target))
+    except (TypeError, ValueError):
+        return False
+    if not expanded:
+        return False
+    candidate = Path(expanded)
+    if not candidate.is_absolute():
+        candidate = base_cwd / candidate
+    try:
+        resolved = candidate.resolve(strict=False)
+        runtime_resolved = runtime.resolve(strict=False)
+    except (OSError, RuntimeError):
+        return False
+    if resolved == runtime_resolved:
+        return True
+    if runtime_resolved in resolved.parents:
+        return True
+    if resolved in runtime_resolved.parents:
+        return True
+    return False
+
+
+def _detect_self_venv_mutation(command: str) -> Optional[str]:
+    """Flag commands that would (re)create a venv over the agent's runtime.
+
+    Returns a human-readable description when the command invokes
+    ``uv venv``, ``python -m venv``, or ``virtualenv`` with a target
+    path that resolves to sys.prefix. Returns None otherwise or when
+    no venv is active (``sys.prefix == sys.base_prefix``).
+    """
+    if sys.prefix == sys.base_prefix:
+        return None
+
+    tokens = _tokenize_shell(command)
+    if not tokens:
+        return None
+
+    runtime = Path(sys.prefix)
+    try:
+        base_cwd = Path(os.getcwd())
+    except (FileNotFoundError, OSError):
+        base_cwd = Path("/")
+
+    for sub_argv in _split_on_operators(tokens):
+        argv = _strip_command_wrappers(sub_argv)
+        for target in _venv_creation_targets(argv):
+            if _resolves_into_runtime(target, runtime, base_cwd):
+                return (
+                    f"{argv[0]} would replace the agent's running runtime "
+                    f"at {sys.prefix}"
+                )
+    return None
 
 
 # =========================================================================

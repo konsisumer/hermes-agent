@@ -837,3 +837,172 @@ class TestChmodExecuteCombo:
         dangerous, _, _ = detect_dangerous_command(cmd)
         assert dangerous is False
 
+
+class TestSelfVenvMutation:
+    """`uv venv`, `python -m venv`, and `virtualenv` silently replace the
+    target directory. Pointing them at sys.prefix wipes the live
+    site-packages and kills the agent mid-session (#7779).
+    """
+
+    def _patch_runtime(self, runtime: str, cwd: str):
+        """Pretend we're running in a venv at `runtime` with cwd at `cwd`."""
+        return [
+            mock_patch.object(approval_module.sys, "prefix", runtime),
+            mock_patch.object(approval_module.sys, "base_prefix", "/usr"),
+            mock_patch.object(approval_module.os, "getcwd", return_value=cwd),
+        ]
+
+    def _run(self, cmd: str, runtime: str, cwd: str):
+        patches = self._patch_runtime(runtime, cwd)
+        for p in patches:
+            p.start()
+        try:
+            return detect_dangerous_command(cmd)
+        finally:
+            for p in patches:
+                p.stop()
+
+    def test_uv_venv_relative_target_into_runtime(self):
+        dangerous, key, desc = self._run(
+            "uv venv venv", runtime="/proj/venv", cwd="/proj"
+        )
+        assert dangerous is True
+        assert "runtime" in desc.lower()
+        assert "/proj/venv" in desc
+
+    def test_uv_venv_absolute_target_into_runtime(self):
+        dangerous, key, desc = self._run(
+            "uv venv /proj/venv --python 3.11",
+            runtime="/proj/venv", cwd="/tmp",
+        )
+        assert dangerous is True
+        assert "runtime" in desc.lower()
+
+    def test_uv_venv_default_path_into_runtime(self):
+        """`uv venv` with no positional arg defaults to `.venv`."""
+        dangerous, key, desc = self._run(
+            "uv venv", runtime="/proj/.venv", cwd="/proj"
+        )
+        assert dangerous is True
+
+    def test_python_dash_m_venv_into_runtime(self):
+        dangerous, key, desc = self._run(
+            "python3 -m venv venv",
+            runtime="/proj/venv", cwd="/proj",
+        )
+        assert dangerous is True
+        assert "runtime" in desc.lower()
+
+    def test_python_dash_m_venv_absolute(self):
+        dangerous, key, desc = self._run(
+            "python -m venv /opt/agent/venv",
+            runtime="/opt/agent/venv", cwd="/",
+        )
+        assert dangerous is True
+
+    def test_virtualenv_into_runtime(self):
+        dangerous, key, desc = self._run(
+            "virtualenv venv",
+            runtime="/proj/venv", cwd="/proj",
+        )
+        assert dangerous is True
+
+    def test_ancestor_target_flagged(self):
+        """`uv venv /proj` when runtime is /proj/venv also destroys runtime."""
+        dangerous, key, desc = self._run(
+            "uv venv /proj",
+            runtime="/proj/venv", cwd="/other",
+        )
+        assert dangerous is True
+
+    def test_chained_command_after_cd(self):
+        """The chained subcommand must still be inspected after ``&&``.
+
+        Note: cd isn't honored — we rely on os.getcwd() as a best-effort
+        approximation. When the agent started in the project directory
+        (the scenario that triggered #7779), cwd already matches.
+        """
+        dangerous, key, desc = self._run(
+            "pwd && uv venv venv",
+            runtime="/proj/venv", cwd="/proj",
+        )
+        assert dangerous is True
+
+    def test_uv_venv_unrelated_path_safe(self):
+        dangerous, key, desc = self._run(
+            "uv venv /tmp/scratch",
+            runtime="/proj/venv", cwd="/proj",
+        )
+        assert dangerous is False
+        assert key is None
+
+    def test_python_venv_unrelated_path_safe(self):
+        dangerous, key, desc = self._run(
+            "python -m venv /tmp/other",
+            runtime="/proj/venv", cwd="/tmp",
+        )
+        assert dangerous is False
+
+    def test_no_venv_active_does_not_flag(self):
+        """System Python (sys.prefix == sys.base_prefix) → nothing to protect."""
+        patches = [
+            mock_patch.object(approval_module.sys, "prefix", "/usr"),
+            mock_patch.object(approval_module.sys, "base_prefix", "/usr"),
+            mock_patch.object(approval_module.os, "getcwd", return_value="/usr"),
+        ]
+        for p in patches:
+            p.start()
+        try:
+            dangerous, key, desc = detect_dangerous_command("uv venv venv")
+        finally:
+            for p in patches:
+                p.stop()
+        assert dangerous is False
+
+    def test_echoing_uv_venv_not_flagged(self):
+        """A quoted `uv venv venv` inside an echo must not trigger."""
+        dangerous, key, desc = self._run(
+            "echo 'uv venv venv'",
+            runtime="/proj/venv", cwd="/proj",
+        )
+        assert dangerous is False
+
+    def test_pip_install_not_flagged(self):
+        """`uv pip install` is not a venv-creation command."""
+        dangerous, key, desc = self._run(
+            "uv pip install -e .",
+            runtime="/proj/venv", cwd="/proj",
+        )
+        assert dangerous is False
+
+    def test_malformed_quotes_do_not_raise(self):
+        """Unbalanced quotes must be handled gracefully (no exception)."""
+        dangerous, key, desc = self._run(
+            "uv venv 'unterminated",
+            runtime="/proj/venv", cwd="/proj",
+        )
+        assert dangerous is False
+
+    def test_sudo_wrapper_stripped(self):
+        dangerous, key, desc = self._run(
+            "sudo uv venv venv",
+            runtime="/proj/venv", cwd="/proj",
+        )
+        assert dangerous is True
+
+    def test_env_wrapper_stripped(self):
+        dangerous, key, desc = self._run(
+            "env UV_CACHE_DIR=/tmp uv venv venv",
+            runtime="/proj/venv", cwd="/proj",
+        )
+        assert dangerous is True
+
+    def test_pattern_key_stable_across_calls(self):
+        """Approval persistence hinges on a stable pattern_key."""
+        _, key_a, _ = self._run(
+            "uv venv venv", runtime="/proj/venv", cwd="/proj"
+        )
+        _, key_b, _ = self._run(
+            "python -m venv /proj/venv", runtime="/proj/venv", cwd="/other"
+        )
+        assert key_a == key_b  # same pattern_key → single approval scope
