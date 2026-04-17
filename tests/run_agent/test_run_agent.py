@@ -2007,6 +2007,99 @@ class TestRunConversation:
         assert result["completed"] is True
         assert result["final_response"] == "(empty)"
 
+    def test_empty_response_triggers_context_compaction_before_fallback(self, agent):
+        """After 3 empty retries, compact context once before invoking fallback.
+
+        Large/noisy context (the "context poison" pattern in #7180) can drive
+        some models to produce nothing.  Compaction gives the current model
+        a chance to recover before a fallback slot is burned.
+        """
+        self._setup_agent(agent)
+        agent.base_url = "http://127.0.0.1:1234/v1"
+        agent.compression_enabled = True
+        agent.context_compressor.last_prompt_tokens = 50_000
+        agent.context_compressor.last_completion_tokens = 0
+        agent.context_compressor._ineffective_compression_count = 0
+
+        empty_resp = _mock_response(content=None, finish_reason="stop")
+        content_resp = _mock_response(
+            content="Recovered after compaction.", finish_reason="stop",
+        )
+        # 4 empty (1 orig + 3 retries), compaction fires, then success
+        agent.client.chat.completions.create.side_effect = [
+            empty_resp, empty_resp, empty_resp, empty_resp, content_resp,
+        ]
+
+        compact_calls = {"count": 0}
+
+        def _mock_compress(messages, system_message, **kwargs):
+            compact_calls["count"] += 1
+            # Return a trimmed copy so the loop proceeds with a new history.
+            return messages[-2:], system_message or "system"
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch.object(agent, "_compress_context", side_effect=_mock_compress),
+            patch.object(agent, "_try_activate_fallback", return_value=False) as mock_fb,
+        ):
+            result = agent.run_conversation("answer me")
+
+        assert compact_calls["count"] == 1, "Compaction should run exactly once"
+        assert not mock_fb.called, "Fallback should not run when compaction recovers"
+        assert result["completed"] is True
+        assert result["final_response"] == "Recovered after compaction."
+
+    def test_empty_response_compaction_guard_runs_once_per_turn(self, agent):
+        """Compaction guard prevents repeated compact attempts within one turn.
+
+        If the model keeps returning empty even after compaction, fallback
+        must be invoked — we don't want an infinite compact loop.
+        """
+        self._setup_agent(agent)
+        agent.base_url = "http://127.0.0.1:1234/v1"
+        agent.compression_enabled = True
+        agent.context_compressor.last_prompt_tokens = 50_000
+        agent.context_compressor.last_completion_tokens = 0
+        agent.context_compressor._ineffective_compression_count = 0
+        agent._fallback_chain = [{"provider": "openrouter", "model": "anthropic/claude-sonnet-4"}]
+        agent._fallback_index = 0
+        agent._fallback_activated = False
+
+        empty_resp = _mock_response(content=None, finish_reason="stop")
+        # 4 empty → compact → 4 more empty → fallback → 4 empty (no more chain)
+        agent.client.chat.completions.create.side_effect = [empty_resp] * 12
+
+        compact_calls = {"count": 0}
+
+        def _mock_compress(messages, system_message, **kwargs):
+            compact_calls["count"] += 1
+            return messages[-2:], system_message or "system"
+
+        def _mock_fallback():
+            if agent._fallback_index >= len(agent._fallback_chain):
+                return False
+            agent._fallback_index += 1
+            agent._fallback_activated = True
+            agent.model = "anthropic/claude-sonnet-4"
+            agent.provider = "openrouter"
+            return True
+
+        with (
+            patch.object(agent, "_persist_session"),
+            patch.object(agent, "_save_trajectory"),
+            patch.object(agent, "_cleanup_task_resources"),
+            patch.object(agent, "_compress_context", side_effect=_mock_compress),
+            patch.object(agent, "_try_activate_fallback", side_effect=_mock_fallback),
+        ):
+            result = agent.run_conversation("answer me")
+
+        assert compact_calls["count"] == 1, (
+            f"Compaction should fire at most once per turn, got {compact_calls['count']}"
+        )
+        assert result["final_response"] == "(empty)"
+
     def test_empty_response_emits_status_for_gateway(self, agent):
         """_emit_status is called during empty retries so gateway users see feedback."""
         self._setup_agent(agent)

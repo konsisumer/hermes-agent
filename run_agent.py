@@ -8310,6 +8310,7 @@ class AIAgent:
         self._codex_incomplete_retries = 0
         self._thinking_prefill_retries = 0
         self._post_tool_empty_retried = False
+        self._compacted_after_empty = False
         self._last_content_with_tools = None
         self._last_content_tools_all_housekeeping = False
         self._mute_post_response = False
@@ -10997,6 +10998,52 @@ class AIAgent:
                                 f"({self._empty_content_retries}/3)"
                             )
                             continue
+
+                        # ── Exhausted retries — try context compression ──
+                        # Large or noisy context (e.g. a 50K tool output) can
+                        # cause some models to generate nothing.  Attempt one
+                        # compression pass before burning a fallback slot so
+                        # the current model gets a fair shot with a trimmed
+                        # history.  Guarded by _compacted_after_empty so this
+                        # fires at most once per run_conversation turn.
+                        if (
+                            _truly_empty
+                            and self.compression_enabled
+                            and not self._compacted_after_empty
+                            and self.context_compressor is not None
+                            and self.context_compressor.last_prompt_tokens > 0
+                            and getattr(
+                                self.context_compressor,
+                                "_ineffective_compression_count", 0,
+                            ) < 2
+                        ):
+                            self._compacted_after_empty = True
+                            logger.warning(
+                                "Empty response after %d retries — compacting "
+                                "context before fallback (model=%s tokens=%s)",
+                                self._empty_content_retries, self.model,
+                                self.context_compressor.last_prompt_tokens,
+                            )
+                            self._emit_status(
+                                "⟳ Compacting context — model may be choking "
+                                "on noisy history..."
+                            )
+                            try:
+                                messages, active_system_prompt = self._compress_context(
+                                    messages, system_message,
+                                    approx_tokens=self.context_compressor.last_prompt_tokens,
+                                    task_id=effective_task_id,
+                                )
+                                conversation_history = None
+                                self._empty_content_retries = 0
+                                self._session_messages = messages
+                                self._save_session_log(messages)
+                                continue
+                            except Exception as _compact_err:
+                                logger.warning(
+                                    "Post-empty compression failed, falling "
+                                    "through to fallback: %s", _compact_err,
+                                )
 
                         # ── Exhausted retries — try fallback provider ──
                         # Before giving up with "(empty)", attempt to
