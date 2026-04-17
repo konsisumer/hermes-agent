@@ -435,13 +435,20 @@ class DockerEnvironment(BaseEnvironment):
             "sleep", "infinity",  # no fixed lifetime — idle reaper handles cleanup
         ]
         logger.debug(f"Starting container: {' '.join(run_cmd)}")
-        result = subprocess.run(
-            run_cmd,
-            capture_output=True,
-            text=True,
-            timeout=120,  # image pull may take a while
-            check=True,
-        )
+        try:
+            result = subprocess.run(
+                run_cmd,
+                capture_output=True,
+                text=True,
+                timeout=120,  # image pull may take a while
+                check=True,
+            )
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+            # Docker may have registered the container (Created state) before
+            # failing — e.g. exit 125 when the daemon isn't fully ready.
+            # Remove it by name so orphans don't accumulate across retries.
+            self._remove_container_by_name(container_name)
+            raise
         self._container_id = result.stdout.strip()
         logger.info(f"Started container {container_name} ({self._container_id[:12]})")
 
@@ -547,6 +554,26 @@ class DockerEnvironment(BaseEnvironment):
             _storage_opt_ok = False
         logger.debug("Docker --storage-opt support: %s", _storage_opt_ok)
         return _storage_opt_ok
+
+    def _remove_container_by_name(self, container_name: str) -> None:
+        """Best-effort removal of a container by name after a failed `docker run`.
+
+        When `docker run -d` fails (e.g. daemon not ready, exit 125), Docker may
+        still have created the container object. Since self._container_id never
+        got assigned, cleanup() can't find it — so we remove by name here.
+        """
+        try:
+            subprocess.run(
+                [self._docker_exe, "rm", "-f", container_name],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+        except Exception as e:
+            logger.debug(
+                "Post-failure cleanup of %s did not complete: %s",
+                container_name, e,
+            )
 
     def cleanup(self):
         """Stop and remove the container. Bind-mount dirs persist if persistent=True."""

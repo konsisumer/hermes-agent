@@ -201,6 +201,75 @@ def test_auto_mount_replaces_persistent_workspace_bind(monkeypatch, tmp_path):
     assert "/sandboxes/docker/test-persistent-auto-mount/workspace:/workspace" not in run_args_str
 
 
+def test_docker_run_failure_removes_orphaned_container_by_name(monkeypatch):
+    """If `docker run -d` fails, any container it created must be removed by name.
+
+    Regression guard for #7439: Docker can register a container in Created
+    state before `docker run` returns a non-zero exit (e.g. daemon not ready,
+    exit 125). `self._container_id` never gets assigned in that path, so the
+    fallback is to `docker rm -f <name>` using the pre-generated name.
+    """
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+
+    calls = []
+
+    def _run(cmd, **kwargs):
+        calls.append((list(cmd) if isinstance(cmd, list) else cmd, kwargs))
+        if isinstance(cmd, list) and len(cmd) >= 2:
+            if cmd[1] == "version":
+                return subprocess.CompletedProcess(cmd, 0, stdout="Docker version", stderr="")
+            if cmd[1] == "run":
+                raise subprocess.CalledProcessError(
+                    returncode=125, cmd=cmd, output="", stderr="daemon not ready"
+                )
+            if cmd[1] == "rm":
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(docker_env.subprocess, "run", _run)
+
+    with pytest.raises(subprocess.CalledProcessError):
+        _make_dummy_env()
+
+    run_calls = [c for c in calls if isinstance(c[0], list) and len(c[0]) >= 2 and c[0][1] == "run"]
+    rm_calls = [c for c in calls if isinstance(c[0], list) and len(c[0]) >= 3 and c[0][1] == "rm" and c[0][2] == "-f"]
+    assert run_calls, "docker run should have been attempted"
+    assert rm_calls, "docker rm -f <name> should be invoked after docker run failure"
+
+    # The rm target must be the same --name argument passed to docker run.
+    run_cmd = run_calls[0][0]
+    name_idx = run_cmd.index("--name") + 1
+    container_name = run_cmd[name_idx]
+    assert container_name.startswith("hermes-")
+    assert rm_calls[0][0][-1] == container_name
+
+
+def test_docker_run_timeout_removes_orphaned_container_by_name(monkeypatch):
+    """TimeoutExpired during `docker run -d` should also trigger cleanup-by-name."""
+    monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
+
+    calls = []
+
+    def _run(cmd, **kwargs):
+        calls.append((list(cmd) if isinstance(cmd, list) else cmd, kwargs))
+        if isinstance(cmd, list) and len(cmd) >= 2:
+            if cmd[1] == "version":
+                return subprocess.CompletedProcess(cmd, 0, stdout="Docker version", stderr="")
+            if cmd[1] == "run":
+                raise subprocess.TimeoutExpired(cmd=cmd, timeout=120)
+            if cmd[1] == "rm":
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+        return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(docker_env.subprocess, "run", _run)
+
+    with pytest.raises(subprocess.TimeoutExpired):
+        _make_dummy_env()
+
+    rm_calls = [c for c in calls if isinstance(c[0], list) and len(c[0]) >= 3 and c[0][1] == "rm" and c[0][2] == "-f"]
+    assert rm_calls, "docker rm -f <name> should be invoked after docker run timeout"
+
+
 def test_non_persistent_cleanup_removes_container(monkeypatch):
     """When persistent=false, cleanup() must schedule docker stop + rm."""
     monkeypatch.setattr(docker_env, "find_docker", lambda: "/usr/bin/docker")
