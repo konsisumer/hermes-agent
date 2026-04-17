@@ -272,7 +272,15 @@ class MemoryManager:
         """Notify all providers of a new turn.
 
         kwargs may include: remaining_tokens, model, platform, tool_count.
+
+        Per-turn ``user_id`` and ``user_name`` are auto-injected from gateway
+        session context variables when the caller hasn't already supplied
+        them. In multi-user sessions (``group_sessions_per_user: false``) a
+        single session receives turns from different users, so providers
+        need per-turn identity to attribute memories correctly — not just
+        the identity captured at ``initialize()``.
         """
+        kwargs = self._inject_session_identity(kwargs)
         for provider in self._providers:
             try:
                 provider.on_turn_start(turn_number, message, **kwargs)
@@ -281,6 +289,29 @@ class MemoryManager:
                     "Memory provider '%s' on_turn_start failed: %s",
                     provider.name, e,
                 )
+
+    @staticmethod
+    def _inject_session_identity(kwargs: Dict[str, Any]) -> Dict[str, Any]:
+        """Fill in ``user_id`` / ``user_name`` from gateway session context vars.
+
+        Only fills values the caller didn't explicitly pass. Empty session
+        context values are skipped so CLI/cron (which don't set these vars)
+        don't clobber explicit caller-provided kwargs.
+        """
+        try:
+            from gateway.session_context import get_session_env
+        except Exception:
+            return kwargs
+        for key, var_name in (
+            ("user_id", "HERMES_SESSION_USER_ID"),
+            ("user_name", "HERMES_SESSION_USER_NAME"),
+        ):
+            if kwargs.get(key):
+                continue
+            value = get_session_env(var_name, "")
+            if value:
+                kwargs[key] = value
+        return kwargs
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
         """Notify all providers of session end."""
@@ -358,11 +389,15 @@ class MemoryManager:
 
         Automatically injects ``hermes_home`` into *kwargs* so that every
         provider can resolve profile-scoped storage paths without importing
-        ``get_hermes_home()`` themselves.
+        ``get_hermes_home()`` themselves. Also auto-injects ``user_id`` /
+        ``user_name`` from gateway session context vars when not already
+        provided, so providers can do attribution in single-user sessions
+        without the caller having to plumb ``user_name`` manually.
         """
         if "hermes_home" not in kwargs:
             from hermes_constants import get_hermes_home
             kwargs["hermes_home"] = str(get_hermes_home())
+        kwargs = self._inject_session_identity(kwargs)
         for provider in self._providers:
             try:
                 provider.initialize(session_id=session_id, **kwargs)

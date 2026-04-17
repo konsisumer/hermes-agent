@@ -78,6 +78,10 @@ class MemoryProvider(ABC):
           - agent_workspace (str): Shared workspace name (e.g. "hermes").
           - parent_session_id (str): For subagents, the parent's session_id.
           - user_id (str): Platform user identifier (gateway sessions).
+          - user_name (str): Platform user display name (gateway sessions).
+            Note: in multi-user sessions (``group_sessions_per_user: false``)
+            this is only the user who opened the session. Use the values
+            passed to ``on_turn_start`` for per-turn attribution.
         """
 
     def system_prompt_block(self) -> str:
@@ -146,8 +150,12 @@ class MemoryProvider(ABC):
 
         Use for turn-counting, scope management, periodic maintenance.
 
-        kwargs may include: remaining_tokens, model, platform, tool_count.
-        Providers use what they need; extras are ignored.
+        kwargs may include: remaining_tokens, model, platform, tool_count,
+        user_id, user_name. ``user_id`` / ``user_name`` identify the user
+        who sent *this turn's* message — critical for attribution in
+        multi-user sessions (``group_sessions_per_user: false``) where one
+        session receives turns from different users. Providers use what
+        they need; extras are ignored.
         """
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:

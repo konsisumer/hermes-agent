@@ -334,3 +334,153 @@ class TestAIAgentUserIdPropagation:
             agent = object.__new__(AIAgent)
             agent._user_id = None
             assert agent._user_id is None
+
+
+# ---------------------------------------------------------------------------
+# Per-turn identity auto-injection from gateway session contextvars
+# ---------------------------------------------------------------------------
+
+
+class _TurnRecordingProvider(RecordingProvider):
+    """Records per-turn kwargs in addition to init kwargs."""
+
+    def __init__(self, name="turn-recording"):
+        super().__init__(name=name)
+        self._turn_kwargs = None
+        self._turn_number = None
+        self._turn_message = None
+
+    def on_turn_start(self, turn_number, message, **kwargs):
+        self._turn_number = turn_number
+        self._turn_message = message
+        self._turn_kwargs = dict(kwargs)
+
+
+@pytest.fixture
+def _reset_session_contextvars():
+    """Reset gateway session contextvars between tests."""
+    from gateway.session_context import _VAR_MAP, _UNSET
+    yield
+    for var in _VAR_MAP.values():
+        var.set(_UNSET)
+
+
+class TestPerTurnIdentityInjection:
+    """In multi-user sessions (group_sessions_per_user=false), providers need
+    per-turn user_id/user_name to attribute memories to the right user. The
+    manager auto-injects these from gateway session contextvars.
+    """
+
+    def test_on_turn_start_injects_user_id_from_contextvar(
+        self, _reset_session_contextvars
+    ):
+        from gateway.session_context import set_session_vars
+
+        mgr = MemoryManager()
+        p = _TurnRecordingProvider()
+        mgr.add_provider(p)
+
+        set_session_vars(user_id="discord_user_42", user_name="alice")
+        mgr.on_turn_start(turn_number=1, message="hello")
+
+        assert p._turn_kwargs.get("user_id") == "discord_user_42"
+        assert p._turn_kwargs.get("user_name") == "alice"
+        assert p._turn_number == 1
+        assert p._turn_message == "hello"
+
+    def test_on_turn_start_caller_kwargs_take_precedence(
+        self, _reset_session_contextvars
+    ):
+        """Explicit caller-provided kwargs must win over contextvar values."""
+        from gateway.session_context import set_session_vars
+
+        mgr = MemoryManager()
+        p = _TurnRecordingProvider()
+        mgr.add_provider(p)
+
+        set_session_vars(user_id="discord_user_42", user_name="alice")
+        mgr.on_turn_start(
+            turn_number=1,
+            message="hello",
+            user_id="explicit-override",
+            user_name="bob",
+        )
+
+        assert p._turn_kwargs["user_id"] == "explicit-override"
+        assert p._turn_kwargs["user_name"] == "bob"
+
+    def test_on_turn_start_no_contextvar_leaves_kwargs_empty(
+        self, _reset_session_contextvars, monkeypatch
+    ):
+        """CLI (no gateway contextvars, no env) should not synthesize values."""
+        monkeypatch.delenv("HERMES_SESSION_USER_ID", raising=False)
+        monkeypatch.delenv("HERMES_SESSION_USER_NAME", raising=False)
+
+        mgr = MemoryManager()
+        p = _TurnRecordingProvider()
+        mgr.add_provider(p)
+
+        mgr.on_turn_start(turn_number=1, message="hello")
+
+        assert "user_id" not in p._turn_kwargs
+        assert "user_name" not in p._turn_kwargs
+
+    def test_on_turn_start_tracks_user_switch_mid_session(
+        self, _reset_session_contextvars
+    ):
+        """Bug #7781: in a shared thread, sequential turns from different
+        users must each report their own identity — initialize() only sees
+        the session opener, so per-turn propagation is the only correct path.
+        """
+        from gateway.session_context import set_session_vars
+
+        mgr = MemoryManager()
+        p = _TurnRecordingProvider()
+        mgr.add_provider(p)
+
+        set_session_vars(user_id="user_alice", user_name="alice")
+        mgr.on_turn_start(turn_number=1, message="hi from alice")
+        alice_turn = p._turn_kwargs
+
+        set_session_vars(user_id="user_bob", user_name="bob")
+        mgr.on_turn_start(turn_number=2, message="hi from bob")
+        bob_turn = p._turn_kwargs
+
+        assert alice_turn["user_id"] == "user_alice"
+        assert alice_turn["user_name"] == "alice"
+        assert bob_turn["user_id"] == "user_bob"
+        assert bob_turn["user_name"] == "bob"
+
+    def test_initialize_all_injects_user_name_from_contextvar(
+        self, _reset_session_contextvars
+    ):
+        """user_name was never plumbed through explicitly; ensure it now
+        reaches initialize() so single-user sessions can attribute correctly."""
+        from gateway.session_context import set_session_vars
+
+        mgr = MemoryManager()
+        p = RecordingProvider()
+        mgr.add_provider(p)
+
+        set_session_vars(user_id="user_99", user_name="charlie")
+        mgr.initialize_all(session_id="sess-x", platform="telegram")
+
+        assert p._init_kwargs.get("user_name") == "charlie"
+        # user_id is injected too (covers the path where the agent didn't
+        # explicitly pass it) — caller-provided values still win.
+        assert p._init_kwargs.get("user_id") == "user_99"
+
+    def test_initialize_all_caller_user_id_wins(self, _reset_session_contextvars):
+        from gateway.session_context import set_session_vars
+
+        mgr = MemoryManager()
+        p = RecordingProvider()
+        mgr.add_provider(p)
+
+        set_session_vars(user_id="from_context", user_name="ctx_name")
+        mgr.initialize_all(
+            session_id="sess-x", platform="telegram", user_id="from_caller"
+        )
+
+        assert p._init_kwargs["user_id"] == "from_caller"
+        assert p._init_kwargs["user_name"] == "ctx_name"
