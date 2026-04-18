@@ -163,6 +163,58 @@ class TestInitSessionFailure:
         assert calls[0]["login"] is True
 
 
+class TestInitSessionBootstrapCwd:
+    """Regression test for issue #7663: the snapshot bootstrap must cd into
+    the configured cwd *before* capturing PWD, otherwise ``_update_cwd``
+    clobbers ``self.cwd`` with the gateway process's startup directory."""
+
+    def _capture_bootstrap(self, env):
+        captured = {}
+
+        def mock_run_bash(cmd, *, login=False, timeout=120, stdin_data=None):
+            captured["cmd"] = cmd
+            captured["login"] = login
+            mock = MagicMock()
+            mock.poll.return_value = 0
+            mock.returncode = 0
+            mock.stdout = iter([])
+            return mock
+
+        env._run_bash = mock_run_bash
+        env.init_session()
+        return captured
+
+    def test_bootstrap_cds_into_configured_cwd_before_snapshot(self):
+        env = _TestableEnv(cwd="/home/user/.hermes/profiles/fern")
+        captured = self._capture_bootstrap(env)
+
+        cmd = captured["cmd"]
+        cd_line = "cd /home/user/.hermes/profiles/fern 2>/dev/null || true"
+        assert cd_line in cmd
+        # cd must appear before the first pwd capture, otherwise the captured
+        # cwd is the host process's startup dir.
+        assert cmd.index(cd_line) < cmd.index("pwd -P >")
+
+    def test_bootstrap_quotes_cwd_with_spaces(self):
+        env = _TestableEnv(cwd="/home/user/my profiles/fern")
+        captured = self._capture_bootstrap(env)
+
+        assert "cd '/home/user/my profiles/fern' 2>/dev/null || true" in captured["cmd"]
+
+    def test_bootstrap_leaves_tilde_unquoted(self):
+        env = _TestableEnv(cwd="~")
+        captured = self._capture_bootstrap(env)
+
+        assert "cd ~ 2>/dev/null || true" in captured["cmd"]
+        assert "cd '~'" not in captured["cmd"]
+
+    def test_bootstrap_skips_cd_when_cwd_empty(self):
+        env = _TestableEnv(cwd="")
+        captured = self._capture_bootstrap(env)
+
+        assert not captured["cmd"].startswith("cd ")
+
+
 class TestCwdMarker:
     def test_marker_contains_session_id(self):
         env = _TestableEnv()

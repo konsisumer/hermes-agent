@@ -325,6 +325,14 @@ class BaseEnvironment(ABC):
     # Session snapshot (init_session)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _quote_cwd(cwd: str) -> str:
+        """Shell-quote a cwd, but leave ~ / ~user prefixes unquoted so bash
+        performs tilde expansion."""
+        if cwd == "~" or cwd.startswith("~/"):
+            return cwd
+        return shlex.quote(cwd)
+
     def init_session(self):
         """Capture login shell environment into a snapshot file.
 
@@ -332,8 +340,18 @@ class BaseEnvironment(ABC):
         ``_snapshot_ready = True`` so subsequent commands source the snapshot
         instead of running with ``bash -l``.
         """
+        # cd into the configured cwd FIRST so the snapshot (and the post-bootstrap
+        # ``_update_cwd`` call) reflects the user-configured working directory
+        # rather than whatever directory the host process happens to be in
+        # (e.g. a gateway service's ``WorkingDirectory``).  Silently ignore a
+        # failing cd here — ``_wrap_command`` will surface the error on the
+        # next real command via ``cd ... || exit 126``.
+        cd_line = ""
+        if self.cwd:
+            cd_line = f"cd {self._quote_cwd(self.cwd)} 2>/dev/null || true\n"
         # Full capture: env vars, functions (filtered), aliases, shell options.
         bootstrap = (
+            f"{cd_line}"
             f"export -p > {self._snapshot_path}\n"
             f"declare -f | grep -vE '^_[^_]' >> {self._snapshot_path}\n"
             f"alias -p >> {self._snapshot_path}\n"
@@ -378,9 +396,7 @@ class BaseEnvironment(ABC):
             parts.append(f"source {self._snapshot_path} 2>/dev/null || true")
 
         # cd to working directory — let bash expand ~ natively
-        quoted_cwd = (
-            shlex.quote(cwd) if cwd != "~" and not cwd.startswith("~/") else cwd
-        )
+        quoted_cwd = self._quote_cwd(cwd)
         parts.append(f"cd {quoted_cwd} || exit 126")
 
         # Run the actual command
