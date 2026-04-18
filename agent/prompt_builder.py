@@ -323,7 +323,9 @@ PLATFORM_HINTS = {
     ),
     "telegram": (
         "You are on a text messaging communication platform, Telegram. "
-        "Please do not use markdown as it does not render. "
+        "Standard markdown is automatically converted to Telegram format. "
+        "Supported: **bold**, *italic*, ~~strikethrough~~, ||spoiler||, "
+        "`inline code`, ```code blocks```, [links](url), and ## headers. "
         "You can send media files natively: to deliver a file to the user, "
         "include MEDIA:/absolute/path/to/file in your response. Images "
         "(.png, .jpg, .webp) appear as photos, audio (.ogg) sends as voice "
@@ -685,7 +687,7 @@ def build_skills_system_prompt(
                 entry.get("description", ""), f"snapshot:{skill_name}",
             )
             skills_by_category.setdefault(category, []).append(
-                (skill_name, desc)
+                (frontmatter_name, desc)
             )
         category_descriptions = {}
         for k, v in (snapshot.get("category_descriptions") or {}).items():
@@ -711,7 +713,7 @@ def build_skills_system_prompt(
             ):
                 continue
             skills_by_category.setdefault(entry["category"], []).append(
-                (skill_name, entry["description"])
+                (entry["frontmatter_name"], entry["description"])
             )
 
         # Read category-level DESCRIPTION.md files
@@ -758,9 +760,10 @@ def build_skills_system_prompt(
                     continue
                 entry = _build_snapshot_entry(skill_file, ext_dir, frontmatter, desc)
                 skill_name = entry["skill_name"]
-                if skill_name in seen_skill_names:
+                frontmatter_name = entry["frontmatter_name"]
+                if frontmatter_name in seen_skill_names:
                     continue
-                if entry["frontmatter_name"] in disabled or skill_name in disabled:
+                if frontmatter_name in disabled or skill_name in disabled:
                     continue
                 if not _skill_should_show(
                     extract_skill_conditions(frontmatter),
@@ -768,9 +771,9 @@ def build_skills_system_prompt(
                     available_toolsets,
                 ):
                     continue
-                seen_skill_names.add(skill_name)
+                seen_skill_names.add(frontmatter_name)
                 skills_by_category.setdefault(entry["category"], []).append(
-                    (skill_name, entry["description"])
+                    (frontmatter_name, entry["description"])
                 )
             except Exception as e:
                 logger.debug("Error reading external skill %s: %s", skill_file, e)
