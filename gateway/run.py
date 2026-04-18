@@ -4206,9 +4206,14 @@ class GatewayRunner:
                 "Keep the introduction concise -- one or two sentences max.]"
             )
         
-        # One-time prompt if no home channel is set for this platform
+        # Optional opt-in prompt if no home channel is set for this platform.
+        # Previously auto-sent on the first turn of every fresh session, which
+        # surfaced in Telegram DMs as confusing unsolicited assistant-looking
+        # text (#7921).  Default is silent now — users discover /sethome via
+        # /help.  Set HERMES_HOME_CHANNEL_PROMPT=true to restore the prompt.
         # Skip for webhooks - they deliver directly to configured targets (github_comment, etc.)
-        if not history and source.platform and source.platform != Platform.LOCAL and source.platform != Platform.WEBHOOK:
+        _prompt_enabled = os.getenv("HERMES_HOME_CHANNEL_PROMPT", "").lower() in ("true", "1", "yes")
+        if _prompt_enabled and not history and source.platform and source.platform != Platform.LOCAL and source.platform != Platform.WEBHOOK:
             platform_name = source.platform.value
             env_key = f"{platform_name.upper()}_HOME_CHANNEL"
             if not os.getenv(env_key):
@@ -4313,6 +4318,22 @@ class GatewayRunner:
                 return None
 
             response = agent_result.get("final_response") or ""
+
+            # Suppress raw internal interrupt status strings on messaging
+            # platforms — the user triggered the interrupt (or the gateway
+            # is shutting down) and doesn't need to see strings like
+            # "Operation interrupted: waiting for model response (Xs
+            # elapsed)" echoed into the chat.  Leave the strings visible on
+            # LOCAL (CLI, where they are informative) and WEBHOOK (direct
+            # machine delivery).  When a pending follow-up is queued, the
+            # recursive path in _run_agent already discards this text. (#7921)
+            if (
+                agent_result.get("interrupted")
+                and response.startswith("Operation interrupted")
+                and source.platform
+                and source.platform not in (Platform.LOCAL, Platform.WEBHOOK)
+            ):
+                response = ""
 
             # Convert the agent's internal "(empty)" sentinel into a
             # user-friendly message.  "(empty)" means the model failed to
