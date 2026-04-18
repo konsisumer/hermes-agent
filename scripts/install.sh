@@ -1129,8 +1129,9 @@ install_node_deps() {
 
     if [ -f "$INSTALL_DIR/package.json" ]; then
         log_info "Installing Node.js dependencies (browser tools)..."
+        log_info "This may take several minutes — browser packages download ~80MB of binaries."
         cd "$INSTALL_DIR"
-        npm install --silent 2>/dev/null || {
+        npm install --no-fund --no-audit || {
             log_warn "npm install failed (browser tools may not work)"
         }
         log_success "Node.js dependencies installed"
