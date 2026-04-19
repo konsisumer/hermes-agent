@@ -80,6 +80,14 @@ class FakeThread:
         self.topic = None
 
 
+class FakeTextChannel:
+    def __init__(self, channel_id: int = 200):
+        self.id = channel_id
+        self.name = "general"
+        self.guild = SimpleNamespace(name="TestServer")
+        self.topic = None
+
+
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
@@ -383,3 +391,173 @@ class TestIncomingDocumentHandling:
         assert event.message_type == MessageType.PHOTO
         assert event.media_urls == ["/tmp/cached_image.png"]
         assert event.media_types == ["image/png"]
+
+
+# ---------------------------------------------------------------------------
+# Tests: Discord auto-generated message.txt from pasted code/long lines
+#
+# When a user pastes a large block of code or long text into a Discord message,
+# Discord automatically converts it to a `message.txt` attachment.  These tests
+# verify that Hermes reads and injects the attachment content so the agent has
+# the pasted material available as inline text.
+# ---------------------------------------------------------------------------
+
+def make_server_message(attachments: list, content: str = "", mentions=None) -> SimpleNamespace:
+    """Build a fake message arriving in a server text channel."""
+    return SimpleNamespace(
+        id=456,
+        content=content,
+        attachments=attachments,
+        mentions=list(mentions or []),
+        reference=None,
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+        channel=FakeTextChannel(),
+        author=SimpleNamespace(id=42, display_name="Tester", name="Tester"),
+    )
+
+
+@pytest.fixture
+def server_adapter(monkeypatch):
+    """Adapter wired to a server channel context with auto-thread disabled."""
+    monkeypatch.setattr(discord_platform.discord, "DMChannel", FakeDMChannel, raising=False)
+    monkeypatch.setattr(discord_platform.discord, "Thread", FakeThread, raising=False)
+    monkeypatch.setenv("DISCORD_AUTO_THREAD", "false")
+
+    config = PlatformConfig(enabled=True, token="fake-token")
+    a = DiscordAdapter(config)
+    bot_user = SimpleNamespace(id=999)
+    a._client = SimpleNamespace(user=bot_user)
+    a._text_batch_delay_seconds = 0
+    a.handle_message = AsyncMock()
+    return a, bot_user
+
+
+class TestDiscordMessageTxtAutoAttachment:
+    """Regression tests for GitHub issue #12511.
+
+    Discord converts large pastes to a `message.txt` attachment.  The gateway
+    must read and inject that content even when message.content is empty after
+    @mention stripping.
+    """
+
+    @pytest.mark.asyncio
+    async def test_message_txt_content_injected_in_free_response_channel(
+        self, server_adapter, monkeypatch
+    ):
+        """In a free-response channel (no mention required) a bare message.txt
+        paste should have its content injected into event.text."""
+        adapter, _ = server_adapter
+        monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "false")
+
+        code = b"def hello():\n    print('world')\n"
+        msg = make_server_message(
+            attachments=[make_attachment(filename="message.txt", content_type="text/plain", size=len(code))],
+            content="",
+        )
+
+        with _mock_aiohttp_download(code):
+            await adapter._handle_message(msg)
+
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.await_args.args[0]
+        assert "[Content of message.txt]:" in event.text
+        assert "def hello():" in event.text
+
+    @pytest.mark.asyncio
+    async def test_message_txt_injected_when_mention_stripped_to_empty(
+        self, server_adapter, monkeypatch
+    ):
+        """Server channel: user @mentions the bot AND pastes code.  After the
+        @mention is stripped from message.content the remaining content is empty,
+        but the message.txt attachment content must still appear in event.text."""
+        adapter, bot_user = server_adapter
+        monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
+
+        code = b"SELECT * FROM users WHERE id = 1;\n"
+        msg = make_server_message(
+            attachments=[make_attachment(filename="message.txt", content_type="text/plain", size=len(code))],
+            content=f"<@{bot_user.id}>",
+            mentions=[bot_user],
+        )
+
+        with _mock_aiohttp_download(code):
+            await adapter._handle_message(msg)
+
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.await_args.args[0]
+        assert "[Content of message.txt]:" in event.text
+        assert "SELECT * FROM users" in event.text
+
+    @pytest.mark.asyncio
+    async def test_message_txt_with_caption_injected_before_caption(
+        self, server_adapter, monkeypatch
+    ):
+        """When the user adds a caption alongside the pasted code, the attachment
+        content is injected before the caption so the agent sees code then question."""
+        adapter, bot_user = server_adapter
+        monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
+
+        code = b"fn main() { println!(\"hello\"); }\n"
+        msg = make_server_message(
+            attachments=[make_attachment(filename="message.txt", content_type="text/plain", size=len(code))],
+            content=f"<@{bot_user.id}> what does this Rust code do?",
+            mentions=[bot_user],
+        )
+
+        with _mock_aiohttp_download(code):
+            await adapter._handle_message(msg)
+
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.await_args.args[0]
+        assert "[Content of message.txt]:" in event.text
+        assert "fn main()" in event.text
+        assert "what does this Rust code do?" in event.text
+        assert event.text.index("[Content of message.txt]") < event.text.index("what does this Rust code do?")
+
+    @pytest.mark.asyncio
+    async def test_message_txt_without_mention_dropped_in_require_mention_channel(
+        self, server_adapter, monkeypatch
+    ):
+        """In a server channel with require_mention=true, a bare message.txt paste
+        with no @mention is still silently dropped (expected gating behaviour)."""
+        adapter, _ = server_adapter
+        monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "true")
+
+        code = b"some pasted text\n"
+        msg = make_server_message(
+            attachments=[make_attachment(filename="message.txt", content_type="text/plain", size=len(code))],
+            content="",
+            mentions=[],
+        )
+
+        with _mock_aiohttp_download(code):
+            await adapter._handle_message(msg)
+
+        adapter.handle_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_message_txt_no_content_type_still_injected(
+        self, server_adapter, monkeypatch
+    ):
+        """When Discord omits content_type for the auto-generated attachment
+        (content_type=None), the gateway must still detect the .txt extension
+        from the filename and inject the content."""
+        adapter, _ = server_adapter
+        monkeypatch.setenv("DISCORD_REQUIRE_MENTION", "false")
+
+        code = b"console.log('hello world');\n"
+        att = SimpleNamespace(
+            filename="message.txt",
+            content_type=None,
+            size=len(code),
+            url="https://cdn.discordapp.com/attachments/fake/message.txt",
+        )
+        msg = make_server_message(attachments=[att], content="")
+
+        with _mock_aiohttp_download(code):
+            await adapter._handle_message(msg)
+
+        adapter.handle_message.assert_awaited_once()
+        event = adapter.handle_message.await_args.args[0]
+        assert "[Content of message.txt]:" in event.text
+        assert "console.log" in event.text
