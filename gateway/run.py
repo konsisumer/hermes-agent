@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import platform
 import re
 import shlex
 import sys
@@ -10775,6 +10776,25 @@ def _start_cron_ticker(stop_event: threading.Event, adapters=None, loop=None, in
     logger.info("Cron ticker stopped")
 
 
+def _is_zombie(pid: int) -> bool:
+    """Return True if pid is a zombie process (Linux only).
+
+    os.kill(pid, 0) succeeds for zombies because they remain in the process
+    table until their parent calls wait().  A zombie cannot be killed and will
+    never release the PID, so the --replace wait loop must treat it as gone.
+    """
+    if platform.system() != "Linux":
+        return False
+    try:
+        with open(f"/proc/{pid}/status") as f:
+            for line in f:
+                if line.startswith("State:"):
+                    return "Z" in line
+    except (FileNotFoundError, PermissionError, OSError):
+        pass
+    return False
+
+
 async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = False, verbosity: Optional[int] = 0) -> bool:
     """
     Start the gateway and run until interrupted.
@@ -10829,10 +10849,18 @@ async def start_gateway(config: Optional[GatewayConfig] = None, replace: bool = 
                 except Exception:
                     pass
                 return False
-            # Wait up to 10 seconds for the old process to exit
+            # Wait up to 10 seconds for the old process to exit.
+            # Also check for zombie state: os.kill(pid, 0) succeeds for
+            # zombies, but they can't be killed and won't vacate the PID.
             for _ in range(20):
                 try:
                     os.kill(existing_pid, 0)
+                    if _is_zombie(existing_pid):
+                        logger.info(
+                            "Old gateway PID %d is a zombie; treating as gone.",
+                            existing_pid,
+                        )
+                        break
                     time.sleep(0.5)
                 except (ProcessLookupError, PermissionError):
                     break  # Process is gone

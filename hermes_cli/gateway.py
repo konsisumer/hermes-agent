@@ -1994,12 +1994,12 @@ def run_gateway(verbose: int = 0, quiet: bool = False, replace: bool = False):
     print("└─────────────────────────────────────────────────────────┘")
     print()
     
-    # Exit with code 1 if gateway fails to connect any platform,
-    # so systemd Restart=on-failure will retry on transient errors
     verbosity = None if quiet else verbose
     success = asyncio.run(start_gateway(replace=replace, verbosity=verbosity))
     if not success:
-        sys.exit(1)
+        # Use RestartForceExitStatus code so systemd bypasses StartLimitBurst
+        # on transient startup failures (e.g. PID file race, platform errors).
+        sys.exit(GATEWAY_SERVICE_RESTART_EXIT_CODE)
 
 
 # =============================================================================

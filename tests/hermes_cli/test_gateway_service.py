@@ -1730,3 +1730,28 @@ class TestSystemdInstallOffersLegacyRemoval:
 
         assert prompt_called["count"] == 0
         assert remove_called["invoked"] is False
+
+
+class TestRunGatewayExitCode:
+    """run_gateway() must exit with GATEWAY_SERVICE_RESTART_EXIT_CODE on failure.
+
+    This ensures systemd's RestartForceExitStatus=75 bypasses StartLimitBurst
+    for transient startup failures (PID file race, platform connection errors).
+    """
+
+    def test_run_gateway_exits_with_service_restart_code_on_failure(self, monkeypatch, capsys):
+        import pytest
+
+        # Simulate start_gateway returning False (startup failure)
+        monkeypatch.setattr(gateway_cli.asyncio, "run", lambda _coro: False)
+
+        with pytest.raises(SystemExit) as exc_info:
+            gateway_cli.run_gateway()
+
+        assert exc_info.value.code == GATEWAY_SERVICE_RESTART_EXIT_CODE
+
+    def test_run_gateway_does_not_exit_on_success(self, monkeypatch, capsys):
+        monkeypatch.setattr(gateway_cli.asyncio, "run", lambda _coro: True)
+
+        # Should not raise SystemExit
+        gateway_cli.run_gateway()
