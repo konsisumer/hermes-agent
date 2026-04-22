@@ -406,6 +406,34 @@ class TestSessionSearch:
         ))
         assert result["success"] is True
 
+    def test_hanging_summarizer_times_out_cleanly(self):
+        """A stuck auxiliary model must not hang session_search forever (#7725)."""
+        import asyncio as _asyncio
+        from unittest.mock import MagicMock, patch as _patch
+        from tools.session_search_tool import session_search
+
+        mock_db = MagicMock()
+        mock_db.search_messages.return_value = [
+            {"session_id": "sid_a", "content": "match", "source": "cli",
+             "session_started": 1709500000, "model": "test"},
+        ]
+        mock_db.get_session.return_value = {"parent_session_id": None}
+        mock_db.get_messages_as_conversation.return_value = [
+            {"role": "user", "content": "hello"},
+        ]
+
+        async def _never_returns(*_a, **_kw):
+            await _asyncio.sleep(3600)
+
+        # Shrink the timeout so the test runs fast but still exercises the
+        # timeout path end-to-end.
+        with _patch("tools.session_search_tool.SUMMARIZATION_TIMEOUT_SECONDS", 0.1), \
+             _patch("tools.session_search_tool.async_call_llm", new=_never_returns):
+            result = json.loads(session_search(query="test", db=mock_db))
+
+        assert result["success"] is False
+        assert "timed out" in result["error"].lower()
+
     def test_current_root_session_excludes_child_lineage(self):
         """Delegation child hits should be excluded when they resolve to the current root session."""
         from unittest.mock import MagicMock
