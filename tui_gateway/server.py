@@ -18,6 +18,52 @@ from hermes_cli.env_loader import load_hermes_dotenv
 _hermes_home = get_hermes_home()
 load_hermes_dotenv(hermes_home=_hermes_home, project_env=Path(__file__).parent.parent / ".env")
 
+# Bridge terminal settings from config.yaml → env vars.
+# In TUI mode, cli.py (and its load_cli_config()) is never imported, so
+# TERMINAL_CWD and related vars are not set from config.yaml otherwise.
+# This mirrors the equivalent bridge in gateway/run.py.
+_config_yaml = _hermes_home / "config.yaml"
+if _config_yaml.exists():
+    try:
+        import yaml as _yaml
+        with open(_config_yaml, encoding="utf-8") as _f:
+            _startup_cfg = _yaml.safe_load(_f) or {}
+        _terminal_cfg = _startup_cfg.get("terminal", {})
+        if isinstance(_terminal_cfg, dict):
+            _terminal_env_map = {
+                "backend": "TERMINAL_ENV",
+                "cwd": "TERMINAL_CWD",
+                "timeout": "TERMINAL_TIMEOUT",
+                "lifetime_seconds": "TERMINAL_LIFETIME_SECONDS",
+                "docker_image": "TERMINAL_DOCKER_IMAGE",
+                "docker_forward_env": "TERMINAL_DOCKER_FORWARD_ENV",
+                "singularity_image": "TERMINAL_SINGULARITY_IMAGE",
+                "modal_image": "TERMINAL_MODAL_IMAGE",
+                "daytona_image": "TERMINAL_DAYTONA_IMAGE",
+                "ssh_host": "TERMINAL_SSH_HOST",
+                "ssh_user": "TERMINAL_SSH_USER",
+                "ssh_port": "TERMINAL_SSH_PORT",
+                "ssh_key": "TERMINAL_SSH_KEY",
+                "container_cpu": "TERMINAL_CONTAINER_CPU",
+                "container_memory": "TERMINAL_CONTAINER_MEMORY",
+                "container_disk": "TERMINAL_CONTAINER_DISK",
+                "container_persistent": "TERMINAL_CONTAINER_PERSISTENT",
+                "docker_volumes": "TERMINAL_DOCKER_VOLUMES",
+                "sandbox_dir": "TERMINAL_SANDBOX_DIR",
+                "persistent_shell": "TERMINAL_PERSISTENT_SHELL",
+            }
+            for _cfg_key, _env_var in _terminal_env_map.items():
+                if _cfg_key in _terminal_cfg:
+                    _val = _terminal_cfg[_cfg_key]
+                    if _cfg_key == "cwd" and str(_val) in (".", "auto", "cwd"):
+                        continue
+                    if isinstance(_val, list):
+                        os.environ[_env_var] = json.dumps(_val)
+                    else:
+                        os.environ[_env_var] = str(_val)
+    except Exception:
+        pass  # best-effort; don't block startup
+
 try:
     from hermes_cli.banner import prefetch_update_check
     prefetch_update_check()
@@ -2466,14 +2512,25 @@ def _(rid, params: dict) -> dict:
             prefix_tag = ""
             path_part = query if is_context else query
 
-        expanded = _normalize_completion_path(path_part) if path_part else "."
-        if expanded == "." or not expanded:
-            search_dir, match = ".", ""
+        # Resolve relative paths against TERMINAL_CWD so completions honour
+        # the configured working directory rather than the process launch dir.
+        _cwd_base = os.getenv("TERMINAL_CWD", "") or os.getcwd()
+        expanded = _normalize_completion_path(path_part) if path_part else ""
+        if not expanded or expanded == ".":
+            search_dir, match = _cwd_base, ""
+        elif os.path.isabs(expanded):
+            if expanded.endswith("/"):
+                search_dir, match = expanded, ""
+            else:
+                search_dir = os.path.dirname(expanded) or "/"
+                match = os.path.basename(expanded)
         elif expanded.endswith("/"):
-            search_dir, match = expanded, ""
+            search_dir = os.path.normpath(os.path.join(_cwd_base, expanded))
+            match = ""
         else:
-            search_dir = os.path.dirname(expanded) or "."
-            match = os.path.basename(expanded)
+            full_expanded = os.path.join(_cwd_base, expanded)
+            search_dir = os.path.dirname(full_expanded) or _cwd_base
+            match = os.path.basename(full_expanded)
 
         if not os.path.isdir(search_dir):
             return _ok(rid, {"items": []})
@@ -2492,7 +2549,7 @@ def _(rid, params: dict) -> dict:
             # which used to defeat the prefix and let `@folder:` list files.
             if prefix_tag and want_dir != is_dir:
                 continue
-            rel = os.path.relpath(full)
+            rel = os.path.relpath(full, _cwd_base)
             suffix = "/" if is_dir else ""
 
             if is_context and prefix_tag:
@@ -2504,6 +2561,8 @@ def _(rid, params: dict) -> dict:
                 text = "~/" + os.path.relpath(full, os.path.expanduser("~")) + suffix
             elif word.startswith("./"):
                 text = "./" + rel + suffix
+            elif os.path.isabs(expanded):
+                text = full + suffix
             else:
                 text = rel + suffix
 

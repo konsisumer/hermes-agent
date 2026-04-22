@@ -34,7 +34,7 @@ def _items(word: str):
 
 
 def test_at_folder_colon_only_dirs(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
     _fixture(tmp_path)
 
     texts = [t for t, _, _ in _items("@folder:")]
@@ -47,7 +47,7 @@ def test_at_folder_colon_only_dirs(tmp_path, monkeypatch):
 
 
 def test_at_file_colon_only_files(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
     _fixture(tmp_path)
 
     texts = [t for t, _, _ in _items("@file:")]
@@ -59,7 +59,7 @@ def test_at_file_colon_only_files(tmp_path, monkeypatch):
 
 
 def test_at_folder_bare_without_colon_lists_dirs(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
     _fixture(tmp_path)
 
     texts = [t for t, _, _ in _items("@folder")]
@@ -70,7 +70,7 @@ def test_at_folder_bare_without_colon_lists_dirs(tmp_path, monkeypatch):
 
 
 def test_at_file_bare_without_colon_lists_files(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("TERMINAL_CWD", str(tmp_path))
     _fixture(tmp_path)
 
     texts = [t for t, _, _ in _items("@file")]
