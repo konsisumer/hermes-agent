@@ -52,4 +52,7 @@ ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
 ENV HERMES_HOME=/opt/data
 ENV PATH="/opt/data/.local/bin:${PATH}"
 VOLUME [ "/opt/data" ]
+# The entrypoint expects to start as root so it can fix volume ownership and
+# drop privileges via gosu.  Reset to root after the non-root build steps.
+USER root
 ENTRYPOINT [ "/opt/hermes/docker/entrypoint.sh" ]

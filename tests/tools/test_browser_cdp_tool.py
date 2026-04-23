@@ -351,7 +351,7 @@ def test_registered_in_browser_toolset():
 
     entry = registry.get_entry("browser_cdp")
     assert entry is not None
-    assert entry.toolset == "browser"
+    assert entry.toolset == "browser-cdp"
     assert entry.schema["name"] == "browser_cdp"
     assert entry.schema["parameters"]["required"] == ["method"]
     assert "Chrome DevTools Protocol" in entry.schema["description"]
