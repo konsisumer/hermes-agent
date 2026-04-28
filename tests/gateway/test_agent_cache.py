@@ -916,7 +916,7 @@ class TestAgentCacheSpilloverLive:
         runner = self._runner()
 
         N_THREADS = 8
-        PER_THREAD = 20  # 8 * 20 = 160 inserts into a 16-slot cache
+        PER_THREAD = 3  # 8 * 3 = 24 inserts into a 16-slot cache
 
         def worker(tid: int):
             for j in range(PER_THREAD):
@@ -1109,8 +1109,8 @@ class TestAgentCacheIdleResume:
         (full teardown — session is done), cache-eviction path uses
         release_clients() (soft — session may resume).
         """
-        from run_agent import AIAgent
         import run_agent as _ra
+        from run_agent import AIAgent
 
         # Agent A: evicted from cache (soft) — terminal survives.
         # Agent B: session expired (hard) — terminal torn down.

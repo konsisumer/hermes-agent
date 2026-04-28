@@ -342,6 +342,8 @@ class TestMinimaxSwitchModelCredentialGuard:
             agent.client = None
             agent._anthropic_client = MagicMock()
             agent._fallback_chain = []
+            agent._fallback_activated = False
+            agent._fallback_index = 0
 
         with patch("agent.anthropic_adapter.build_anthropic_client") as mock_build, \
              patch("agent.anthropic_adapter.resolve_anthropic_token", return_value="sk-ant-leaked") as mock_resolve, \

@@ -4884,3 +4884,60 @@ class TestMemoryProviderTurnStart:
         import inspect
         src = inspect.getsource(AIAgent.run_conversation)
         assert "on_turn_start(self._user_turn_count" in src
+
+
+class TestMultimodalMessagePreview:
+    """run_conversation must not crash when user_message is a list (images)."""
+
+    def test_multimodal_list_message_does_not_crash(self, agent):
+        """When user_message is a multimodal list, the log preview should
+        extract text parts instead of calling .replace() on a list."""
+        multimodal_msg = [
+            {"type": "text", "text": "Describe this image"},
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+        ]
+
+        fake_response = MagicMock()
+        fake_response.choices = [
+            MagicMock(
+                message=MagicMock(
+                    content="I see an image.",
+                    tool_calls=None,
+                    role="assistant",
+                ),
+                finish_reason="stop",
+            )
+        ]
+        fake_response.usage = MagicMock(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+        agent._interruptible_api_call = MagicMock(return_value=fake_response)
+        agent._model_supports_vision = lambda: True
+        agent._persist_session = lambda *a, **kw: None
+        agent._save_trajectory = lambda *a, **kw: None
+        agent._save_session_log = lambda *a, **kw: None
+
+        result = agent.run_conversation(multimodal_msg)
+        assert result["completed"] is True
+        assert "final_response" in result
+
+    def test_multimodal_no_text_parts(self, agent):
+        """A multimodal message with only images should produce a safe preview."""
+        multimodal_msg = [
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,abc"}},
+        ]
+
+        fake_response = MagicMock()
+        fake_response.choices = [
+            MagicMock(
+                message=MagicMock(content="Image.", tool_calls=None, role="assistant"),
+                finish_reason="stop",
+            )
+        ]
+        fake_response.usage = MagicMock(prompt_tokens=10, completion_tokens=5, total_tokens=15)
+        agent._interruptible_api_call = MagicMock(return_value=fake_response)
+        agent._model_supports_vision = lambda: True
+        agent._persist_session = lambda *a, **kw: None
+        agent._save_trajectory = lambda *a, **kw: None
+        agent._save_session_log = lambda *a, **kw: None
+
+        result = agent.run_conversation(multimodal_msg)
+        assert result["completed"] is True
