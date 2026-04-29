@@ -18,19 +18,17 @@ from tools.approval import (
 )
 
 
+def _clear_all_sessions():
+    approval_module._permanent_approved.clear()
+    approval_module._session_approved.clear()
+    approval_module._session_yolo.clear()
+
+
 @pytest.fixture(autouse=True)
 def _clear_approval_state():
-    approval_module._permanent_approved.clear()
-    approval_module.clear_session("default")
-    approval_module.clear_session("test-session")
-    approval_module.clear_session("session-a")
-    approval_module.clear_session("session-b")
+    _clear_all_sessions()
     yield
-    approval_module._permanent_approved.clear()
-    approval_module.clear_session("default")
-    approval_module.clear_session("test-session")
-    approval_module.clear_session("session-a")
-    approval_module.clear_session("session-b")
+    _clear_all_sessions()
 
 
 class TestYoloMode:
@@ -181,11 +179,11 @@ class TestYoloMode:
         finally:
             reset_current_session_key(token_b)
 
-    def test_clear_session_removes_session_yolo_state(self):
+    def test_disable_session_removes_session_yolo_state(self):
         """Session cleanup must remove YOLO bypass state."""
         enable_session_yolo("session-a")
         assert is_session_yolo_enabled("session-a") is True
 
-        approval_module.clear_session("session-a")
+        disable_session_yolo("session-a")
 
         assert is_session_yolo_enabled("session-a") is False

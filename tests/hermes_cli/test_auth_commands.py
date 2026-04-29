@@ -5,6 +5,7 @@ from __future__ import annotations
 import base64
 import json
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 import pytest
 
@@ -33,6 +34,13 @@ def _clear_provider_env(monkeypatch):
         "CLAUDE_CODE_OAUTH_TOKEN",
     ):
         monkeypatch.delenv(key, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _block_codex_import():
+    """Prevent _seed_from_singletons from importing real ~/.codex/ credentials."""
+    with patch("hermes_cli.auth._import_codex_cli_tokens", return_value=None):
+        yield
 
 
 def test_auth_add_api_key_persists_manual_entry(tmp_path, monkeypatch):
@@ -1458,6 +1466,7 @@ def test_credential_sources_registry_has_expected_steps():
         "~/.claude/.credentials.json",
         "~/.hermes/.anthropic_oauth.json",
         "auth.json providers.nous",
+        "auth.json providers.minimax-oauth",
         "auth.json providers.openai-codex + ~/.codex/auth.json",
         "~/.qwen/oauth_creds.json",
         "Custom provider config.yaml api_key field",

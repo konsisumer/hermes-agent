@@ -29,6 +29,7 @@ from gateway.platforms.api_server import (
     _IdempotencyCache,
     _CORS_HEADERS,
     _derive_chat_session_id,
+    _strip_think_blocks,
     check_api_server_requirements,
     cors_middleware,
     security_headers_middleware,
@@ -612,7 +613,7 @@ class TestChatCompletionsEndpoint:
                 cb = kwargs.get("stream_delta_callback")
                 if cb:
                     cb("Working")
-                    await asyncio.sleep(0.65)
+                    await asyncio.sleep(1.5)
                     cb("...done")
                 return (
                     {"final_response": "Working...done", "messages": [], "api_calls": 1},
@@ -2491,3 +2492,263 @@ class TestSessionIdHeader:
             call_kwargs = mock_run.call_args.kwargs
             assert call_kwargs["conversation_history"] == []
             assert call_kwargs["session_id"] == "some-session"
+
+
+# ---------------------------------------------------------------------------
+# _strip_think_blocks  (#7556)
+# ---------------------------------------------------------------------------
+
+
+class TestStripThinkBlocks:
+    def test_removes_think_tags(self):
+        assert _strip_think_blocks("<think>internal</think>Hello") == "Hello"
+
+    def test_removes_thinking_tags(self):
+        assert _strip_think_blocks("<thinking>internal</thinking>Hello") == "Hello"
+
+    def test_removes_reasoning_tags(self):
+        assert _strip_think_blocks("<reasoning>internal</reasoning>Hello") == "Hello"
+
+    def test_removes_reasoning_scratchpad_tags(self):
+        result = _strip_think_blocks("<REASONING_SCRATCHPAD>notes</REASONING_SCRATCHPAD>Hello")
+        assert result == "Hello"
+
+    def test_removes_multiline_think_blocks(self):
+        content = "<think>line1\nline2\nline3</think>\n\nActual response"
+        assert _strip_think_blocks(content) == "Actual response"
+
+    def test_removes_orphaned_opening_tag(self):
+        assert _strip_think_blocks("<think>orphaned\nHello") == "orphaned\nHello"
+
+    def test_preserves_plain_content(self):
+        assert _strip_think_blocks("No tags here") == "No tags here"
+
+    def test_empty_string(self):
+        assert _strip_think_blocks("") == ""
+
+    def test_none_passthrough(self):
+        assert _strip_think_blocks(None) is None
+
+    def test_case_insensitive_thinking(self):
+        assert _strip_think_blocks("<THINKING>secret</THINKING>Hi") == "Hi"
+
+
+# ---------------------------------------------------------------------------
+# show_reasoning integration  (#7556)
+# ---------------------------------------------------------------------------
+
+
+class TestShowReasoningNonStreaming:
+    """Non-streaming /v1/chat/completions with show_reasoning enabled."""
+
+    @pytest.mark.asyncio
+    async def test_reasoning_prepended_when_enabled(self, adapter):
+        adapter._show_reasoning = True
+        mock_result = {
+            "final_response": "The answer is 42.",
+            "last_reasoning": "Let me think step by step...",
+            "messages": [],
+            "api_calls": 1,
+        }
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (
+                    mock_result,
+                    {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30},
+                )
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={"model": "test", "messages": [{"role": "user", "content": "Hi"}]},
+                )
+                assert resp.status == 200
+                data = await resp.json()
+                content = data["choices"][0]["message"]["content"]
+                assert content.startswith("<think>")
+                assert "Let me think step by step..." in content
+                assert content.endswith("The answer is 42.")
+
+    @pytest.mark.asyncio
+    async def test_no_reasoning_when_disabled(self, adapter):
+        adapter._show_reasoning = False
+        mock_result = {
+            "final_response": "The answer is 42.",
+            "last_reasoning": "Let me think step by step...",
+            "messages": [],
+            "api_calls": 1,
+        }
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (
+                    mock_result,
+                    {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30},
+                )
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={"model": "test", "messages": [{"role": "user", "content": "Hi"}]},
+                )
+                assert resp.status == 200
+                data = await resp.json()
+                content = data["choices"][0]["message"]["content"]
+                assert "<think>" not in content
+                assert content == "The answer is 42."
+
+    @pytest.mark.asyncio
+    async def test_no_reasoning_key_in_result(self, adapter):
+        """When show_reasoning is enabled but result has no last_reasoning."""
+        adapter._show_reasoning = True
+        mock_result = {
+            "final_response": "Hello!",
+            "messages": [],
+            "api_calls": 1,
+        }
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (
+                    mock_result,
+                    {"input_tokens": 5, "output_tokens": 5, "total_tokens": 10},
+                )
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={"model": "test", "messages": [{"role": "user", "content": "Hi"}]},
+                )
+                assert resp.status == 200
+                data = await resp.json()
+                content = data["choices"][0]["message"]["content"]
+                assert "<think>" not in content
+                assert content == "Hello!"
+
+
+class TestShowReasoningStreaming:
+    """Streaming /v1/chat/completions with show_reasoning enabled."""
+
+    @pytest.mark.asyncio
+    async def test_streaming_reasoning_chunk_emitted(self, adapter):
+        adapter._show_reasoning = True
+        mock_result = {
+            "final_response": "Done.",
+            "last_reasoning": "Step-by-step reasoning here.",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (
+                    mock_result,
+                    {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30},
+                )
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "test",
+                        "messages": [{"role": "user", "content": "Hi"}],
+                        "stream": True,
+                    },
+                )
+                assert resp.status == 200
+                body = await resp.text()
+                # The reasoning chunk should appear as <think> in the SSE stream
+                assert "<think>" in body
+                assert "Step-by-step reasoning here." in body
+
+    @pytest.mark.asyncio
+    async def test_streaming_no_reasoning_when_disabled(self, adapter):
+        adapter._show_reasoning = False
+        mock_result = {
+            "final_response": "Done.",
+            "last_reasoning": "Should not appear.",
+            "messages": [],
+            "api_calls": 1,
+        }
+
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (
+                    mock_result,
+                    {"input_tokens": 10, "output_tokens": 20, "total_tokens": 30},
+                )
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "test",
+                        "messages": [{"role": "user", "content": "Hi"}],
+                        "stream": True,
+                    },
+                )
+                assert resp.status == 200
+                body = await resp.text()
+                assert "<think>" not in body
+                assert "Should not appear." not in body
+
+
+class TestInboundThinkStripping:
+    """Assistant messages in request history have <think> blocks stripped."""
+
+    @pytest.mark.asyncio
+    async def test_assistant_think_blocks_stripped(self, adapter):
+        mock_result = {
+            "final_response": "Follow-up answer.",
+            "messages": [],
+            "api_calls": 1,
+        }
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (
+                    mock_result,
+                    {"input_tokens": 10, "output_tokens": 10, "total_tokens": 20},
+                )
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "test",
+                        "messages": [
+                            {"role": "user", "content": "What is 2+2?"},
+                            {"role": "assistant", "content": "<think>I need to add</think>\n\n4"},
+                            {"role": "user", "content": "And 3+3?"},
+                        ],
+                    },
+                )
+                assert resp.status == 200
+                call_kwargs = mock_run.call_args.kwargs
+                # The assistant message in history should have <think> block stripped
+                history = call_kwargs["conversation_history"]
+                assistant_msg = [m for m in history if m["role"] == "assistant"][0]
+                assert "<think>" not in assistant_msg["content"]
+                assert "4" in assistant_msg["content"]
+
+    @pytest.mark.asyncio
+    async def test_user_messages_not_stripped(self, adapter):
+        mock_result = {
+            "final_response": "Response.",
+            "messages": [],
+            "api_calls": 1,
+        }
+        app = _create_app(adapter)
+        async with TestClient(TestServer(app)) as cli:
+            with patch.object(adapter, "_run_agent", new_callable=AsyncMock) as mock_run:
+                mock_run.return_value = (
+                    mock_result,
+                    {"input_tokens": 10, "output_tokens": 10, "total_tokens": 20},
+                )
+                resp = await cli.post(
+                    "/v1/chat/completions",
+                    json={
+                        "model": "test",
+                        "messages": [
+                            {"role": "user", "content": "Tell me about <think> tags"},
+                            {"role": "user", "content": "Follow up"},
+                        ],
+                    },
+                )
+                assert resp.status == 200
+                call_kwargs = mock_run.call_args.kwargs
+                history = call_kwargs["conversation_history"]
+                # User messages should preserve <think> text (it's literal user content)
+                user_msg = history[0]
+                assert "<think>" in user_msg["content"]

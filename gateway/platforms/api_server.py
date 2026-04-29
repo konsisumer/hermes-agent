@@ -279,6 +279,38 @@ def check_api_server_requirements() -> bool:
     return AIOHTTP_AVAILABLE
 
 
+def _strip_think_blocks(content: str) -> str:
+    """Remove <think>/<thinking>/<reasoning> blocks from content.
+
+    Used to sanitise inbound assistant messages so that reasoning traces
+    injected by Hermes on previous turns are not fed back to the model.
+    """
+    if not content:
+        return content
+    content = re.sub(r'<think>.*?</think>', '', content, flags=re.DOTALL)
+    content = re.sub(r'<thinking>.*?</thinking>', '', content, flags=re.DOTALL | re.IGNORECASE)
+    content = re.sub(r'<reasoning>.*?</reasoning>', '', content, flags=re.DOTALL)
+    content = re.sub(r'<REASONING_SCRATCHPAD>.*?</REASONING_SCRATCHPAD>', '', content, flags=re.DOTALL)
+    # Catch orphaned/unclosed tags
+    content = re.sub(r'</?(?:think|thinking|reasoning|REASONING_SCRATCHPAD)>\s*', '', content, flags=re.IGNORECASE)
+    return content.strip()
+
+
+def _load_show_reasoning() -> bool:
+    """Read ``display.show_reasoning`` from the user's config.yaml."""
+    try:
+        import yaml as _y
+        from hermes_cli.config import get_hermes_home
+        cfg_path = get_hermes_home() / "config.yaml"
+        if cfg_path.exists():
+            with open(cfg_path, encoding="utf-8") as fh:
+                cfg = _y.safe_load(fh) or {}
+            return bool(cfg.get("display", {}).get("show_reasoning", False))
+    except Exception:
+        pass
+    return False
+
+
 class ResponseStore:
     """
     SQLite-backed LRU store for Responses API state.
@@ -595,6 +627,7 @@ class APIServerAdapter(BasePlatformAdapter):
         # Pollable run status for dashboards and external control-plane UIs.
         self._run_statuses: Dict[str, Dict[str, Any]] = {}
         self._session_db: Optional[Any] = None  # Lazy-init SessionDB for session continuity
+        self._show_reasoning: bool = _load_show_reasoning()
 
     @staticmethod
     def _parse_cors_origins(value: Any) -> tuple[str, ...]:
@@ -898,6 +931,11 @@ class APIServerAdapter(BasePlatformAdapter):
                     content = _normalize_multimodal_content(raw_content)
                 except ValueError as exc:
                     return _multimodal_validation_error(exc, param=f"messages[{idx}].content")
+                # Strip reasoning tags from prior assistant messages so the
+                # model never sees its own <think> traces replayed as content.
+                # This prevents the round-trip pollution described in #7556.
+                if role == "assistant" and isinstance(content, str):
+                    content = _strip_think_blocks(content)
                 conversation_messages.append({"role": role, "content": content})
 
         # Extract the last user message as the primary input
@@ -1088,6 +1126,14 @@ class APIServerAdapter(BasePlatformAdapter):
         if not final_response:
             final_response = result.get("error", "(No response generated)")
 
+        # Prepend reasoning in <think> tags so Open WebUI (and similar
+        # frontends) can render it in a collapsible "Thoughts" panel.
+        # Inbound stripping (above) prevents round-trip pollution.  #7556
+        if self._show_reasoning:
+            reasoning = result.get("last_reasoning")
+            if reasoning:
+                final_response = f"<think>{reasoning.strip()}</think>\n\n{final_response}"
+
         response_data = {
             "id": completion_id,
             "object": "chat.completion",
@@ -1206,11 +1252,28 @@ class APIServerAdapter(BasePlatformAdapter):
 
             # Get usage from completed agent
             usage = {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}
+            result = {}
             try:
                 result, agent_usage = await agent_task
                 usage = agent_usage or usage
             except Exception:
                 pass
+
+            # Append reasoning as <think> content chunks so Open WebUI
+            # (and similar frontends) can render a collapsible "Thoughts"
+            # panel.  Inbound stripping in _handle_chat_completions
+            # removes these tags when the client replays them, preventing
+            # round-trip pollution.  See #7556.
+            if self._show_reasoning and result:
+                reasoning = result.get("last_reasoning")
+                if reasoning:
+                    think_text = f"\n\n<think>{reasoning.strip()}</think>"
+                    think_chunk = {
+                        "id": completion_id, "object": "chat.completion.chunk",
+                        "created": created, "model": model,
+                        "choices": [{"index": 0, "delta": {"content": think_text}, "finish_reason": None}],
+                    }
+                    await response.write(f"data: {json.dumps(think_chunk)}\n\n".encode())
 
             # Finish chunk
             finish_chunk = {

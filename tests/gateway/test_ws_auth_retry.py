@@ -114,16 +114,11 @@ class TestMatrixSyncAuthRetry:
     """gateway/platforms/matrix.py — _sync_loop()"""
 
     def test_unknown_token_sync_error_stops_loop(self):
-        """A SyncError with M_UNKNOWN_TOKEN should stop syncing."""
-        import types
-        nio_mock = types.ModuleType("nio")
+        """An exception with M_UNKNOWN_TOKEN should stop syncing.
 
-        class SyncError:
-            def __init__(self, message):
-                self.message = message
-
-        nio_mock.SyncError = SyncError
-
+        The sync loop detects permanent auth failures via exception string
+        matching (401/403/unauthorized/forbidden keywords).
+        """
         from gateway.platforms.matrix import MatrixAdapter
         adapter = MatrixAdapter.__new__(MatrixAdapter)
         adapter._closing = False
@@ -133,7 +128,7 @@ class TestMatrixSyncAuthRetry:
         async def fake_sync(timeout=30000, since=None):
             nonlocal sync_count
             sync_count += 1
-            return SyncError("M_UNKNOWN_TOKEN: Invalid access token")
+            raise RuntimeError("M_UNKNOWN_TOKEN: 401 Unauthorized")
 
         adapter._client = MagicMock()
         adapter._client.sync = fake_sync
@@ -142,15 +137,7 @@ class TestMatrixSyncAuthRetry:
         adapter._pending_megolm = []
         adapter._joined_rooms = set()
 
-        async def run():
-            import sys
-            sys.modules["nio"] = nio_mock
-            try:
-                await adapter._sync_loop()
-            finally:
-                del sys.modules["nio"]
-
-        asyncio.run(run())
+        asyncio.run(adapter._sync_loop())
         assert sync_count == 1
 
     def test_exception_with_401_stops_loop(self):

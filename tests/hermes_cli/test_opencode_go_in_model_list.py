@@ -5,6 +5,12 @@ from unittest.mock import patch
 
 from hermes_cli.model_switch import list_authenticated_providers
 
+_FAKE_MODELS_DEV = {
+    "opencode-go": {
+        "env": ["OPENCODE_GO_API_KEY"],
+        "models": ["glm-5", "kimi-k2.5", "mimo-v2-pro", "mimo-v2-omni", "minimax-m2.7", "minimax-m2.5"],
+    },
+}
 
 # Minimum set of models that must be present for opencode-go no matter
 # whether the picker sourced its list from curated-only or curated+models.dev.
@@ -22,8 +28,9 @@ _OPENCODE_GO_REQUIRED = {
 }
 
 
+@patch("agent.models_dev.fetch_models_dev", return_value=_FAKE_MODELS_DEV)
 @patch.dict(os.environ, {"OPENCODE_GO_API_KEY": "test-key"}, clear=False)
-def test_opencode_go_appears_when_api_key_set():
+def test_opencode_go_appears_when_api_key_set(_mock_fetch):
     """opencode-go should appear in list_authenticated_providers when OPENCODE_GO_API_KEY is set."""
     providers = list_authenticated_providers(current_provider="openrouter", max_models=50)
 

@@ -151,6 +151,11 @@ def test_resolve_runtime_provider_codex(monkeypatch):
 
 
 def test_resolve_runtime_provider_qwen_oauth(monkeypatch):
+    class _EmptyPool:
+        def has_credentials(self):
+            return False
+
+    monkeypatch.setattr(rp, "load_pool", lambda provider: _EmptyPool())
     monkeypatch.setattr(rp, "resolve_provider", lambda *a, **k: "qwen-oauth")
     monkeypatch.setattr(
         rp,

@@ -44,7 +44,7 @@ def _reset_logging_state():
             root.removeHandler(h)
             h.close()
     hermes_logging._logging_initialized = False
-    hermes_logging.clear_session_context()
+    hermes_logging._session_context.session_id = None
 
 
 @pytest.fixture
@@ -332,27 +332,29 @@ class TestGatewayMode:
 
     def test_agent_log_still_receives_all(self, hermes_home):
         """agent.log (catch-all) still receives gateway AND tool records."""
-        hermes_logging.setup_logging(hermes_home=hermes_home, mode="gateway")
+        hermes_logging.setup_logging(hermes_home=hermes_home, mode="gateway", force=True)
+
+        import uuid
+        tag = uuid.uuid4().hex[:8]
 
         gw_logger = logging.getLogger("gateway.run")
-        file_logger = logging.getLogger("tools.file_tools")
-        # Ensure propagation and levels are clean (cross-test pollution defense)
-        gw_logger.propagate = True
-        file_logger.propagate = True
-        logging.getLogger("tools").propagate = True
-        file_logger.setLevel(logging.NOTSET)
-        logging.getLogger("tools").setLevel(logging.NOTSET)
+        tool_logger = logging.getLogger("tools.file_tools")
 
-        gw_logger.info("gateway msg")
-        file_logger.info("file msg")
+        for name in ("gateway", "gateway.run", "tools", "tools.file_tools"):
+            _lg = logging.getLogger(name)
+            _lg.setLevel(logging.NOTSET)
+            _lg.propagate = True
+
+        gw_logger.info("gateway msg %s", tag)
+        tool_logger.info("file msg %s", tag)
 
         for h in logging.getLogger().handlers:
             h.flush()
 
         agent_log = hermes_home / "logs" / "agent.log"
         content = agent_log.read_text()
-        assert "gateway msg" in content
-        assert "file msg" in content
+        assert f"gateway msg {tag}" in content
+        assert f"file msg {tag}" in content
 
 
 class TestSessionContext:
@@ -377,7 +379,7 @@ class TestSessionContext:
     def test_no_session_tag_without_context(self, hermes_home):
         """Without session context, log lines have no session tag."""
         hermes_logging.setup_logging(hermes_home=hermes_home)
-        hermes_logging.clear_session_context()
+        hermes_logging._session_context.session_id = None
 
         test_logger = logging.getLogger("test.no_session")
         test_logger.info("untagged message")
@@ -398,7 +400,7 @@ class TestSessionContext:
         """After clearing, session tag disappears."""
         hermes_logging.setup_logging(hermes_home=hermes_home)
         hermes_logging.set_session_context("xyz789")
-        hermes_logging.clear_session_context()
+        hermes_logging._session_context.session_id = None
 
         test_logger = logging.getLogger("test.cleared")
         test_logger.info("after clear")
@@ -458,7 +460,7 @@ class TestRecordFactory:
         assert hasattr(record, "session_tag")
 
     def test_empty_tag_without_context(self):
-        hermes_logging.clear_session_context()
+        hermes_logging._session_context.session_id = None
         factory = logging.getLogRecordFactory()
         record = factory("test", logging.INFO, "", 0, "msg", (), None)
         assert record.session_tag == ""

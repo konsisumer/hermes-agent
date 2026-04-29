@@ -85,88 +85,85 @@ class TestRealSubagentInterrupt(unittest.TestCase):
         result_holder = [None]
         error_holder = [None]
 
+        original_run = AIAgent.run_conversation
+
+        def patched_run(self_agent, *args, **kwargs):
+            child_started.set()
+            return original_run(self_agent, *args, **kwargs)
+
+        mock_client = MagicMock()
+        mock_client.chat.completions.create = _make_slow_api_response(delay=5.0)
+        mock_client.close = MagicMock()
+
         def run_delegate():
             try:
-                # Patch the OpenAI client creation inside AIAgent.__init__
-                with patch('run_agent.OpenAI') as MockOpenAI:
-                    mock_client = MagicMock()
-                    # API call takes 5 seconds — should be interrupted before that
-                    mock_client.chat.completions.create = _make_slow_api_response(delay=5.0)
-                    mock_client.close = MagicMock()
-                    MockOpenAI.return_value = mock_client
-
-                    # Patch the instance method so it skips prompt assembly
-                    with patch.object(AIAgent, '_build_system_prompt', return_value="You are a test agent"):
-                        # Signal when child starts
-                        original_run = AIAgent.run_conversation
-
-                        def patched_run(self_agent, *args, **kwargs):
-                            child_started.set()
-                            return original_run(self_agent, *args, **kwargs)
-
-                        with patch.object(AIAgent, 'run_conversation', patched_run):
-                            # Build a real child agent (AIAgent is NOT patched here,
-                            # only run_conversation and _build_system_prompt are)
-                            child = AIAgent(
-                                base_url="http://localhost:1",
-                                api_key="test-key",
-                                model="test/model",
-                                provider="test",
-                                api_mode="chat_completions",
-                                max_iterations=5,
-                                enabled_toolsets=["terminal"],
-                                quiet_mode=True,
-                                skip_context_files=True,
-                                skip_memory=True,
-                                platform="cli",
-                            )
-                            child._delegate_depth = 1
-                            parent._active_children.append(child)
-                            result = _run_single_child(
-                                task_index=0,
-                                goal="Test task",
-                                child=child,
-                                parent_agent=parent,
-                            )
-                            result_holder[0] = result
+                child = AIAgent(
+                    base_url="http://localhost:1",
+                    api_key="test-key",
+                    model="test/model",
+                    provider="test",
+                    api_mode="chat_completions",
+                    max_iterations=5,
+                    enabled_toolsets=["terminal"],
+                    quiet_mode=True,
+                    skip_context_files=True,
+                    skip_memory=True,
+                    platform="cli",
+                )
+                child._delegate_depth = 1
+                parent._active_children.append(child)
+                result = _run_single_child(
+                    task_index=0,
+                    goal="Test task",
+                    child=child,
+                    parent_agent=parent,
+                )
+                result_holder[0] = result
             except Exception as e:
                 import traceback
                 traceback.print_exc()
                 error_holder[0] = e
 
-        agent_thread = threading.Thread(target=run_delegate, daemon=True)
-        agent_thread.start()
+        # Patches on the main thread so they always unwind, even if
+        # the daemon thread is killed or raises.
+        mock_openai = patch('run_agent.OpenAI', return_value=mock_client)
+        mock_prompt = patch.object(AIAgent, '_build_system_prompt', return_value="You are a test agent")
+        mock_run = patch.object(AIAgent, 'run_conversation', patched_run)
 
-        # Wait for child to start run_conversation
-        started = child_started.wait(timeout=10)
-        if not started:
-            agent_thread.join(timeout=1)
-            if error_holder[0]:
-                raise error_holder[0]
-            self.fail("Child never started run_conversation")
+        with mock_openai, mock_prompt, mock_run:
+            agent_thread = threading.Thread(target=run_delegate, daemon=True)
+            agent_thread.start()
 
-        # Give child time to enter main loop and start API call
-        time.sleep(0.5)
+            # Wait for child to start run_conversation
+            started = child_started.wait(timeout=10)
+            if not started:
+                agent_thread.join(timeout=1)
+                if error_holder[0]:
+                    raise error_holder[0]
+                self.fail("Child never started run_conversation")
 
-        # Verify child is registered
-        print(f"Active children: {len(parent._active_children)}")
-        self.assertGreaterEqual(len(parent._active_children), 1,
-                                "Child not registered in _active_children")
+            # Give child time to enter main loop and start API call
+            time.sleep(0.5)
 
-        # Interrupt! (simulating what CLI does)
-        start = time.monotonic()
-        parent.interrupt("User typed a new message")
+            # Verify child is registered
+            print(f"Active children: {len(parent._active_children)}")
+            self.assertGreaterEqual(len(parent._active_children), 1,
+                                    "Child not registered in _active_children")
 
-        # Check propagation
-        child = parent._active_children[0] if parent._active_children else None
-        if child:
-            print(f"Child._interrupt_requested after parent.interrupt(): {child._interrupt_requested}")
-            self.assertTrue(child._interrupt_requested,
-                           "Interrupt did not propagate to child!")
+            # Interrupt! (simulating what CLI does)
+            start = time.monotonic()
+            parent.interrupt("User typed a new message")
 
-        # Wait for delegate to finish (should be fast since interrupted)
-        agent_thread.join(timeout=5)
-        elapsed = time.monotonic() - start
+            # Check propagation
+            child = parent._active_children[0] if parent._active_children else None
+            if child:
+                print(f"Child._interrupt_requested after parent.interrupt(): {child._interrupt_requested}")
+                self.assertTrue(child._interrupt_requested,
+                               "Interrupt did not propagate to child!")
+
+            # Wait for delegate to finish (should be fast since interrupted)
+            agent_thread.join(timeout=5)
+            elapsed = time.monotonic() - start
 
         if error_holder[0]:
             raise error_holder[0]
