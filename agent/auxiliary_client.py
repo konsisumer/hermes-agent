@@ -2065,7 +2065,12 @@ def resolve_provider_client(
     # ── Custom endpoint (OPENAI_BASE_URL + OPENAI_API_KEY) ───────────
     if provider == "custom":
         if explicit_base_url:
-            custom_base = _to_openai_base_url(explicit_base_url).strip()
+            # anthropic_messages must preserve the original URL intact; the
+            # /anthropic → /v1 rewrite only applies to OpenAI-wire clients.
+            if api_mode == "anthropic_messages":
+                custom_base = str(explicit_base_url or "").strip().rstrip("/")
+            else:
+                custom_base = _to_openai_base_url(explicit_base_url).strip()
             custom_key = (
                 (explicit_api_key or "").strip()
                 or os.getenv("OPENAI_API_KEY", "").strip()
@@ -2081,6 +2086,30 @@ def resolve_provider_client(
                 model or (main_runtime.get("model") if main_runtime else None) or "gpt-4o-mini",
                 provider,
             )
+            # anthropic_messages: route directly through AnthropicAuxiliaryClient.
+            # Mirrors _try_custom_endpoint() and the named custom provider branch.
+            if api_mode == "anthropic_messages":
+                try:
+                    from agent.anthropic_adapter import build_anthropic_client
+                    real_client = build_anthropic_client(custom_key, custom_base)
+                except ImportError:
+                    logger.warning(
+                        "resolve_provider_client: explicit_base_url with "
+                        "api_mode=anthropic_messages but the anthropic SDK is not "
+                        "installed — falling back to OpenAI-wire."
+                    )
+                    _fb_base = _to_openai_base_url(explicit_base_url).strip()
+                    _fb_clean, _fb_dq = _extract_url_query_params(_fb_base)
+                    _fb_extra = {"default_query": _fb_dq} if _fb_dq else {}
+                    client = OpenAI(api_key=custom_key, base_url=_fb_clean, **_fb_extra)
+                    return (_to_async_client(client, final_model, is_vision=is_vision) if async_mode
+                            else (client, final_model))
+                sync_client = AnthropicAuxiliaryClient(
+                    real_client, final_model, custom_key, custom_base, is_oauth=False,
+                )
+                if async_mode:
+                    return AsyncAnthropicAuxiliaryClient(sync_client), final_model
+                return sync_client, final_model
             extra = {}
             _clean_base, _dq = _extract_url_query_params(custom_base)
             if _dq:
