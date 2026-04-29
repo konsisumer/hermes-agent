@@ -371,7 +371,16 @@ export default function ConfigPage() {
               schemaKey={key}
               schema={s}
               value={getNestedValue(config, key)}
-              onChange={(v) => setConfig(setNestedValue(config, key, v))}
+              onChange={(v) => {
+                let next = setNestedValue(config, key, v);
+                // When the model name changes, clear model_provider so the
+                // backend can infer the correct provider for the new model
+                // rather than inheriting the stale one.
+                if (key === "model") {
+                  next = setNestedValue(next, "model_provider", "");
+                }
+                setConfig(next);
+              }}
             />
           </div>
         </div>

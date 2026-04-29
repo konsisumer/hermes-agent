@@ -1970,3 +1970,270 @@ class TestPtyWebSocket:
             ):
                 pass
         assert exc.value.code == 4400
+
+
+# ---------------------------------------------------------------------------
+# model_provider virtual field — normalize / denormalize / schema
+# ---------------------------------------------------------------------------
+
+
+class TestModelProviderVirtualField:
+    """Tests for the model_provider virtual field surfaced by the config API.
+
+    Regression: when the user picked a model from a different provider in the
+    Web UI, the provider was never updated — the stale on-disk provider was
+    preserved because _denormalize_config_from_web only updated `default`.
+    """
+
+    # ── normalize ──────────────────────────────────────────────────────────
+
+    def test_normalize_extracts_provider_from_dict(self):
+        """normalize should surface provider from model dict as model_provider."""
+        from hermes_cli.web_server import _normalize_config_for_web
+
+        cfg = {"model": {"default": "google/gemini-3-flash", "provider": "openrouter"}}
+        result = _normalize_config_for_web(cfg)
+        assert result["model"] == "google/gemini-3-flash"
+        assert result["model_provider"] == "openrouter"
+
+    def test_normalize_bare_string_yields_empty_provider(self):
+        """normalize should set model_provider='' for a bare string model."""
+        from hermes_cli.web_server import _normalize_config_for_web
+
+        result = _normalize_config_for_web({"model": "anthropic/claude-sonnet-4"})
+        assert result["model_provider"] == ""
+
+    def test_normalize_dict_without_provider_yields_empty(self):
+        """normalize should set model_provider='' when model dict has no provider."""
+        from hermes_cli.web_server import _normalize_config_for_web
+
+        cfg = {"model": {"default": "test/model"}}
+        result = _normalize_config_for_web(cfg)
+        assert result["model_provider"] == ""
+
+    # ── denormalize: explicit model_provider override ──────────────────────
+
+    def test_denormalize_explicit_provider_override_switches_provider(self):
+        """Sending model_provider should update the disk provider."""
+        from hermes_cli.web_server import _denormalize_config_from_web
+        from hermes_cli.config import save_config
+
+        save_config({
+            "model": {
+                "default": "llama3.2",
+                "provider": "ollama-local",
+                "base_url": "http://localhost:11434/v1",
+            }
+        })
+
+        result = _denormalize_config_from_web({
+            "model": "google/gemini-3-flash",
+            "model_provider": "openrouter",
+        })
+        assert isinstance(result["model"], dict)
+        assert result["model"]["default"] == "google/gemini-3-flash"
+        assert result["model"]["provider"] == "openrouter"
+        # provider-specific fields from old provider should be cleared
+        assert "base_url" not in result["model"]
+        assert "model_provider" not in result  # virtual field consumed
+
+    def test_denormalize_explicit_provider_same_as_disk_no_op(self):
+        """Sending model_provider matching disk provider should be a no-op."""
+        from hermes_cli.web_server import _denormalize_config_from_web
+        from hermes_cli.config import save_config
+
+        save_config({
+            "model": {
+                "default": "anthropic/claude-opus-4.6",
+                "provider": "openrouter",
+            }
+        })
+
+        result = _denormalize_config_from_web({
+            "model": "anthropic/claude-sonnet-4.6",
+            "model_provider": "openrouter",
+        })
+        assert result["model"]["provider"] == "openrouter"
+
+    def test_denormalize_explicit_empty_provider_runs_inference(self):
+        """Empty model_provider should fall through to inference, not wipe provider."""
+        from hermes_cli.web_server import _denormalize_config_from_web
+        from hermes_cli.config import save_config
+
+        save_config({
+            "model": {
+                "default": "llama3.2",
+                "provider": "ollama-local",
+                "base_url": "http://localhost:11434/v1",
+            }
+        })
+
+        # Same model — no change → provider preserved
+        result = _denormalize_config_from_web({
+            "model": "llama3.2",
+            "model_provider": "",
+        })
+        assert result["model"]["provider"] == "ollama-local"
+
+    # ── denormalize: inference when model changes ──────────────────────────
+
+    def test_denormalize_model_change_infers_provider_from_user_providers_list(self):
+        """When model changes to one in user providers' models list, switch provider."""
+        from hermes_cli.web_server import _denormalize_config_from_web
+        from hermes_cli.config import save_config
+
+        save_config({
+            "model": {
+                "default": "llama3.2",
+                "provider": "ollama-local",
+                "base_url": "http://localhost:11434/v1",
+            },
+            "providers": {
+                "openrouter": {
+                    "models": ["google/gemini-2.5-flash", "anthropic/claude-opus-4.7"],
+                }
+            },
+        })
+
+        result = _denormalize_config_from_web({
+            "model": "google/gemini-2.5-flash",
+            "model_provider": "",
+        })
+        assert result["model"]["provider"] == "openrouter"
+        assert result["model"]["default"] == "google/gemini-2.5-flash"
+        assert "base_url" not in result["model"]
+
+    def test_denormalize_model_change_infers_provider_from_openrouter_catalog(self):
+        """When model changes to one in OPENROUTER_MODELS, switch to openrouter."""
+        from hermes_cli.web_server import _denormalize_config_from_web
+        from hermes_cli.config import save_config
+        from hermes_cli.models import OPENROUTER_MODELS
+        from unittest.mock import patch
+
+        # Use the first model in OPENROUTER_MODELS as a known good entry
+        if not OPENROUTER_MODELS:
+            pytest.skip("OPENROUTER_MODELS is empty")
+        known_openrouter_model = OPENROUTER_MODELS[0][0]
+
+        save_config({
+            "model": {
+                "default": "llama3.2",
+                "provider": "ollama-local",
+                "base_url": "http://localhost:11434/v1",
+            },
+        })
+
+        result = _denormalize_config_from_web({
+            "model": known_openrouter_model,
+            "model_provider": "",
+        })
+        assert result["model"]["provider"] == "openrouter"
+        assert result["model"]["default"] == known_openrouter_model
+        assert "base_url" not in result["model"]
+
+    def test_denormalize_same_model_no_provider_change(self):
+        """When model stays the same, provider should not change."""
+        from hermes_cli.web_server import _denormalize_config_from_web
+        from hermes_cli.config import save_config
+
+        save_config({
+            "model": {
+                "default": "llama3.2",
+                "provider": "ollama-local",
+                "base_url": "http://localhost:11434/v1",
+            }
+        })
+
+        result = _denormalize_config_from_web({
+            "model": "llama3.2",
+            "model_provider": "",
+        })
+        assert result["model"]["provider"] == "ollama-local"
+        assert result["model"].get("base_url") == "http://localhost:11434/v1"
+
+    def test_denormalize_unknown_model_preserves_provider(self):
+        """When model changes to an unknown model, keep existing provider."""
+        from hermes_cli.web_server import _denormalize_config_from_web
+        from hermes_cli.config import save_config
+
+        save_config({
+            "model": {
+                "default": "llama3.2",
+                "provider": "ollama-local",
+                "base_url": "http://localhost:11434/v1",
+            }
+        })
+
+        result = _denormalize_config_from_web({
+            "model": "totally-unknown-model:v999",
+            "model_provider": "",
+        })
+        # Unknown model — provider should not change
+        assert result["model"]["provider"] == "ollama-local"
+
+    # ── schema ─────────────────────────────────────────────────────────────
+
+    def test_schema_has_model_provider(self):
+        """CONFIG_SCHEMA should include model_provider virtual field."""
+        from hermes_cli.web_server import CONFIG_SCHEMA
+        assert "model_provider" in CONFIG_SCHEMA
+
+    def test_schema_model_provider_after_model_context_length(self):
+        """model_provider should appear immediately after model_context_length."""
+        from hermes_cli.web_server import CONFIG_SCHEMA
+        keys = list(CONFIG_SCHEMA.keys())
+        mcl_idx = keys.index("model_context_length")
+        assert keys[mcl_idx + 1] == "model_provider"
+
+    def test_schema_model_provider_is_string(self):
+        """model_provider schema entry should have type=string."""
+        from hermes_cli.web_server import CONFIG_SCHEMA
+        entry = CONFIG_SCHEMA["model_provider"]
+        assert entry["type"] == "string"
+        assert entry["category"] == "general"
+
+
+# ---------------------------------------------------------------------------
+# _infer_provider_for_model unit tests
+# ---------------------------------------------------------------------------
+
+
+class TestInferProviderForModel:
+    """Unit tests for _infer_provider_for_model."""
+
+    def test_finds_model_in_user_providers_list(self):
+        from hermes_cli.web_server import _infer_provider_for_model
+
+        disk_cfg = {
+            "providers": {
+                "my-openrouter": {
+                    "models": ["vendor/model-a", "vendor/model-b"],
+                }
+            }
+        }
+        assert _infer_provider_for_model("vendor/model-a", disk_cfg) == "my-openrouter"
+
+    def test_user_providers_dict_is_not_list(self):
+        """providers: {} should be a dict; non-dict values are skipped."""
+        from hermes_cli.web_server import _infer_provider_for_model
+
+        disk_cfg = {"providers": {"bad": "not-a-dict"}}
+        # should not crash; returns None for bad entries
+        result = _infer_provider_for_model("anything", disk_cfg)
+        assert result is None
+
+    def test_no_providers_falls_through_to_catalog(self):
+        from hermes_cli.web_server import _infer_provider_for_model
+        from hermes_cli.models import OPENROUTER_MODELS
+
+        if not OPENROUTER_MODELS:
+            pytest.skip("OPENROUTER_MODELS is empty")
+        model_id = OPENROUTER_MODELS[0][0]
+        result = _infer_provider_for_model(model_id, {})
+        assert result == "openrouter"
+
+    def test_unknown_model_returns_none(self):
+        from hermes_cli.web_server import _infer_provider_for_model
+
+        result = _infer_provider_for_model("nonexistent/model-xyzzy-9999", {})
+        assert result is None
