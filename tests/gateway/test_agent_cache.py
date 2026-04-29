@@ -920,7 +920,10 @@ class TestAgentCacheSpilloverLive:
 
         def worker(tid: int):
             for j in range(PER_THREAD):
-                a = self._real_agent()
+                # Use a lightweight mock — this test exercises cache
+                # concurrency mechanics, not agent construction.
+                a = MagicMock()
+                a._last_activity_ts = __import__("time").time()
                 key = f"t{tid}-s{j}"
                 with runner._agent_cache_lock:
                     runner._agent_cache[key] = (a, "sig")
@@ -1109,8 +1112,8 @@ class TestAgentCacheIdleResume:
         (full teardown — session is done), cache-eviction path uses
         release_clients() (soft — session may resume).
         """
+        from unittest.mock import patch
         from run_agent import AIAgent
-        import run_agent as _ra
 
         # Agent A: evicted from cache (soft) — terminal survives.
         # Agent B: session expired (hard) — terminal torn down.
@@ -1130,20 +1133,14 @@ class TestAgentCacheIdleResume:
         )
 
         vm_calls: list = []
-        # AIAgent.close() calls the ``cleanup_vm`` name bound into
-        # ``run_agent`` at import time, not ``tools.terminal_tool.cleanup_vm``
-        # directly — so patch the ``run_agent`` reference.
-        original_vm = _ra.cleanup_vm
-        _ra.cleanup_vm = lambda tid: vm_calls.append(tid)
-        try:
+        with patch("run_agent.cleanup_vm", side_effect=lambda tid: vm_calls.append(tid)):
             agent_a.release_clients()   # cache eviction
             agent_b.close()              # session expiry
-        finally:
-            _ra.cleanup_vm = original_vm
-            try:
-                agent_a.close()
-            except Exception:
-                pass
+        # patch is no longer active — agent_a.close() won't be recorded
+        try:
+            agent_a.close()
+        except Exception:
+            pass
 
         # Only agent_b's task_id should appear in cleanup calls.
         assert "hard-session" in vm_calls

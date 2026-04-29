@@ -351,9 +351,6 @@ def test_registered_in_browser_toolset():
 
     entry = registry.get_entry("browser_cdp")
     assert entry is not None
-    # browser_cdp lives in its own toolset so its stricter check_fn
-    # (requires reachable CDP endpoint) doesn't gate the whole browser
-    # toolset — see commit 96b0f3700.
     assert entry.toolset == "browser-cdp"
     assert entry.schema["name"] == "browser_cdp"
     assert entry.schema["parameters"]["required"] == ["method"]
