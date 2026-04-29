@@ -1646,6 +1646,41 @@ def test_complete_slash_surfaces_completer_error(monkeypatch):
     assert "no completer" in resp["error"]["message"]
 
 
+def test_complete_slash_display_is_plain_string(monkeypatch):
+    """complete.slash must convert prompt_toolkit FormattedText display values
+    to plain strings before sending them over RPC.
+
+    Regression: c.display is a FormattedText object, not a str.  Passing it
+    raw caused JSON serialization failures and broken rendering in the TUI
+    completion dropdown.
+    """
+    from prompt_toolkit.formatted_text import FormattedText
+
+    class _FakeCompletion:
+        text = "/resume"
+        display = FormattedText([("class:command", "/resume")])
+        display_meta = FormattedText([("", "Resume a session")])
+
+    with patch("hermes_cli.commands.SlashCommandCompleter") as MockCompleter:
+        instance = MockCompleter.return_value
+        instance.get_completions.return_value = [_FakeCompletion()]
+
+        resp = server.handle_request(
+            {"id": "1", "method": "complete.slash", "params": {"text": "/res"}}
+        )
+
+    assert "result" in resp, resp
+    items = resp["result"]["items"]
+    assert len(items) >= 1
+    item = next(i for i in items if i["text"] == "/resume")
+    assert isinstance(item["display"], str), (
+        "display must be a plain str — FormattedText breaks JSON serialization"
+    )
+    assert item["display"] == "/resume"
+    assert isinstance(item["meta"], str)
+    assert item["meta"] == "Resume a session"
+
+
 def test_input_detect_drop_attaches_image(monkeypatch):
     fake_cli = types.ModuleType("cli")
     fake_cli._detect_file_drop = lambda raw: {
@@ -2276,8 +2311,10 @@ def test_session_create_close_race_does_not_orphan_worker(monkeypatch):
 
     # Make _build block until we release it — simulates slow agent init
     release_build = threading.Event()
+    build_started = threading.Event()
 
     def _slow_make_agent(sid, key):
+        build_started.set()
         release_build.wait(timeout=3.0)
         return _FakeAgent()
 
@@ -2305,7 +2342,7 @@ def test_session_create_close_race_does_not_orphan_worker(monkeypatch):
     )
     monkeypatch.setattr(_approval, "load_permanent_allowlist", lambda: None)
 
-    # Start: session.create spawns _build thread, returns synchronously
+    # session.create returns immediately; the build starts via a deferred timer.
     resp = server.handle_request(
         {
             "id": "1",
@@ -2315,6 +2352,10 @@ def test_session_create_close_race_does_not_orphan_worker(monkeypatch):
     )
     assert resp.get("result"), f"got error: {resp.get('error')}"
     sid = resp["result"]["session_id"]
+
+    # Wait until the deferred build thread has entered _make_agent and is
+    # blocked there — only then does the race window exist.
+    assert build_started.wait(timeout=3.0), "build thread did not start within 3 s"
 
     # Build thread is blocked in _slow_make_agent.  Close the session
     # NOW — this pops _sessions[sid] before _build can install the
