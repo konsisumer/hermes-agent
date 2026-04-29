@@ -910,6 +910,7 @@ class TestAgentCacheSpilloverLive:
     def test_concurrent_inserts_settle_at_cap(self, monkeypatch):
         """Many threads inserting in parallel end with len(cache) == CAP."""
         from gateway import run as gw_run
+        from unittest.mock import MagicMock
 
         CAP = 16
         monkeypatch.setattr(gw_run, "_AGENT_CACHE_MAX_SIZE", CAP)
@@ -920,7 +921,7 @@ class TestAgentCacheSpilloverLive:
 
         def worker(tid: int):
             for j in range(PER_THREAD):
-                a = self._real_agent()
+                a = MagicMock()  # lightweight; test exercises cache sizing, not agent lifecycle
                 key = f"t{tid}-s{j}"
                 with runner._agent_cache_lock:
                     runner._agent_cache[key] = (a, "sig")
@@ -1128,7 +1129,6 @@ class TestAgentCacheIdleResume:
             skip_context_files=True, skip_memory=True,
             session_id="hard-session",
         )
-
         vm_calls: list = []
         # AIAgent.close() calls the ``cleanup_vm`` name bound into
         # ``run_agent`` at import time, not ``tools.terminal_tool.cleanup_vm``
