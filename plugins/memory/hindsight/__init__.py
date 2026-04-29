@@ -477,6 +477,7 @@ class HindsightMemoryProvider(MemoryProvider):
         self._retain_context = "conversation between Hermes Agent and the User"
         self._turn_counter = 0
         self._session_turns: list[str] = []  # accumulates ALL turns for the session
+        self._sync_error_logged: str | None = None  # dedup repeated sync failure warnings
 
         # Recall controls
         self._auto_recall = True
@@ -653,17 +654,12 @@ class HindsightMemoryProvider(MemoryProvider):
             sys.stdout.write("  LLM API key: ")
             sys.stdout.flush()
             llm_key = getpass.getpass(prompt="") if sys.stdin.isatty() else sys.stdin.readline().strip()
-            if llm_key:
-                env_writes["HINDSIGHT_LLM_API_KEY"] = llm_key
-            else:
-                env_path = Path(hermes_home) / ".env"
-                existing_llm_key = ""
-                if env_path.exists():
-                    for line in env_path.read_text().splitlines():
-                        if line.startswith("HINDSIGHT_LLM_API_KEY="):
-                            existing_llm_key = line.split("=", 1)[1]
-                            break
-                env_writes["HINDSIGHT_LLM_API_KEY"] = existing_llm_key
+            if not llm_key:
+                llm_key = _load_simple_env(Path(hermes_home) / ".env").get("HINDSIGHT_LLM_API_KEY", "")
+            # Always write explicitly (including empty) so the provider sees ""
+            # rather than a missing variable.  The daemon reads from .env at
+            # startup and fails when HINDSIGHT_LLM_API_KEY is unset.
+            env_writes["HINDSIGHT_LLM_API_KEY"] = llm_key
 
         # Step 4: Save everything
         provider_config.setdefault("bank_id", "hermes")
@@ -776,6 +772,15 @@ class HindsightMemoryProvider(MemoryProvider):
             if self._mode == "local_embedded":
                 available, reason = _check_local_runtime()
                 if not available:
+                    if reason and "No module named" in reason:
+                        import sys
+                        raise RuntimeError(
+                            "Hindsight 'local_embedded' mode requires the 'hindsight-all' package, "
+                            "which is not installed. The 'hindsight-client' package (declared in "
+                            "plugin.yaml) only provides the cloud/external client.\n\n"
+                            f"  uv pip install --python {sys.executable} hindsight-all\n\n"
+                            "Or re-run:  hermes memory setup"
+                        )
                     raise RuntimeError(
                         "Hindsight local runtime is unavailable"
                         + (f": {reason}" if reason else "")
@@ -983,7 +988,44 @@ class HindsightMemoryProvider(MemoryProvider):
         # "local" is a legacy alias for "local_embedded"
         if self._mode == "local":
             self._mode = "local_embedded"
+            logger.warning(
+                "Hindsight config uses deprecated mode 'local' (now 'local_embedded'). "
+                "Update ~/.hermes/hindsight/config.json to set \"mode\": \"local_embedded\", "
+                "or re-run: hermes memory setup"
+            )
+
+        # For local_embedded mode, verify hindsight-all is installed and attempt auto-install
         if self._mode == "local_embedded":
+            try:
+                from importlib.metadata import version as pkg_version
+                pkg_version("hindsight-all")
+            except Exception:
+                logger.warning(
+                    "Hindsight 'local_embedded' mode requires the 'hindsight-all' package, "
+                    "which is not installed. Attempting auto-install..."
+                )
+                import shutil, subprocess, sys
+                uv_path = shutil.which("uv")
+                if uv_path:
+                    try:
+                        subprocess.run(
+                            [uv_path, "pip", "install", "--python", sys.executable,
+                             "--quiet", "hindsight-all"],
+                            check=True, timeout=120, capture_output=True,
+                        )
+                        logger.info("hindsight-all installed successfully")
+                    except Exception as e:
+                        logger.error(
+                            "Failed to auto-install hindsight-all: %s. "
+                            "Install manually: uv pip install --python %s hindsight-all  "
+                            "Or re-run: hermes memory setup",
+                            e, sys.executable,
+                        )
+                else:
+                    logger.error(
+                        "uv not found. Install hindsight-all manually: "
+                        "pip install hindsight-all  Or re-run: hermes memory setup"
+                    )
             available, reason = _check_local_runtime()
             if not available:
                 logger.warning(
@@ -992,6 +1034,8 @@ class HindsightMemoryProvider(MemoryProvider):
                 )
                 self._mode = "disabled"
                 return
+
+
         self._api_key = self._config.get("apiKey") or self._config.get("api_key") or os.environ.get("HINDSIGHT_API_KEY", "")
         default_url = _DEFAULT_LOCAL_URL if self._mode in ("local_embedded", "local_external") else _DEFAULT_API_URL
         self._api_url = self._config.get("api_url") or os.environ.get("HINDSIGHT_API_URL", default_url)
@@ -1325,25 +1369,33 @@ class HindsightMemoryProvider(MemoryProvider):
         retain_context = self._retain_context
 
         def _do_retain() -> None:
-            item = self._build_retain_kwargs(
-                content,
-                context=retain_context,
-                metadata=metadata_snapshot,
-                tags=lineage_tags or None,
-            )
-            item.pop("bank_id", None)
-            item.pop("retain_async", None)
-            logger.debug("Hindsight retain: bank=%s, doc=%s, async=%s, content_len=%d, num_turns=%d",
-                         bank_id, document_id, retain_async_flag, len(content), num_turns)
-            self._run_hindsight_operation(
-                lambda client: client.aretain_batch(
-                    bank_id=bank_id,
-                    items=[item],
-                    document_id=document_id,
-                    retain_async=retain_async_flag,
+            try:
+                item = self._build_retain_kwargs(
+                    content,
+                    context=retain_context,
+                    metadata=metadata_snapshot,
+                    tags=lineage_tags or None,
                 )
-            )
-            logger.debug("Hindsight retain succeeded")
+                item.pop("bank_id", None)
+                item.pop("retain_async", None)
+                logger.debug("Hindsight retain: bank=%s, doc=%s, async=%s, content_len=%d, num_turns=%d",
+                             bank_id, document_id, retain_async_flag, len(content), num_turns)
+                self._run_hindsight_operation(
+                    lambda client: client.aretain_batch(
+                        bank_id=bank_id,
+                        items=[item],
+                        document_id=document_id,
+                        retain_async=retain_async_flag,
+                    )
+                )
+                logger.debug("Hindsight retain succeeded")
+            except Exception as e:
+                err_key = str(type(e).__name__)
+                if self._sync_error_logged != err_key:
+                    self._sync_error_logged = err_key
+                    logger.warning("Hindsight sync failed: %s", e, exc_info=True)
+                else:
+                    logger.debug("Hindsight sync failed (repeated): %s", e)
 
         self._ensure_writer()
         self._register_atexit()
