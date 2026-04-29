@@ -1856,6 +1856,52 @@ class TestAdapterBehavior(unittest.TestCase):
         self.assertTrue(captured["request"].request_body.reply_in_thread)
 
     @patch.dict(os.environ, {}, clear=True)
+    def test_send_uses_thread_id_receive_type_when_no_reply_to(self):
+        # When reply_to is absent but thread_id is in metadata (e.g. progress messages
+        # or approval cards dispatched without a specific reply anchor), messages must
+        # be sent to the thread directly via receive_id_type="thread_id" so they stay
+        # inside the existing topic rather than creating a new one.
+        from gateway.config import PlatformConfig
+        from gateway.platforms.feishu import FeishuAdapter
+
+        adapter = FeishuAdapter(PlatformConfig())
+        captured = {}
+
+        class _MessageAPI:
+            def create(self, request):
+                captured["request"] = request
+                return SimpleNamespace(
+                    success=lambda: True,
+                    data=SimpleNamespace(message_id="om_thread_msg"),
+                )
+
+        adapter._client = SimpleNamespace(
+            im=SimpleNamespace(
+                v1=SimpleNamespace(
+                    message=_MessageAPI(),
+                )
+            )
+        )
+
+        async def _direct(func, *args, **kwargs):
+            return func(*args, **kwargs)
+
+        with patch("gateway.platforms.feishu.asyncio.to_thread", side_effect=_direct):
+            result = asyncio.run(
+                adapter.send(
+                    chat_id="oc_chat",
+                    content="thinking…",
+                    reply_to=None,
+                    metadata={"thread_id": "omt-thread"},
+                )
+            )
+
+        self.assertTrue(result.success)
+        self.assertEqual(result.message_id, "om_thread_msg")
+        self.assertEqual(captured["request"].receive_id_type, "thread_id")
+        self.assertEqual(captured["request"].request_body.receive_id, "omt-thread")
+
+    @patch.dict(os.environ, {}, clear=True)
     def test_send_retries_transient_failure(self):
         from gateway.config import PlatformConfig
         from gateway.platforms.feishu import FeishuAdapter
