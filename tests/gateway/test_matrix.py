@@ -2845,6 +2845,23 @@ class TestMatrixMarkdownHtmlFormatting:
         assert "<ol>" in result
         assert "<pre><code" in result
 
+    def test_pipe_table(self):
+        result = self.convert(
+            "\n".join(
+                [
+                    "| Item | Quantity |",
+                    "| --- | --- |",
+                    "| Apples | 4 |",
+                    "| Bread | 1 |",
+                ]
+            )
+        )
+        assert "<table>" in result
+        assert "<thead>" in result
+        assert "<tbody>" in result
+        assert "<th>Item</th>" in result
+        assert "<td>Apples</td>" in result
+
 
 # ---------------------------------------------------------------------------
 # Link URL sanitization

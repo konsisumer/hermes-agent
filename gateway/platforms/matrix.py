@@ -3973,6 +3973,30 @@ class MatrixAdapter(BasePlatformAdapter):
             placeholders.append(html_fragment)
             return f"\x00PROTECTED{idx}\x00"
 
+        def _split_markdown_table_row(line: str) -> list[str]:
+            stripped = line.strip()
+            if stripped.startswith("|"):
+                stripped = stripped[1:]
+            if stripped.endswith("|"):
+                stripped = stripped[:-1]
+            return [cell.strip() for cell in stripped.split("|")]
+
+        def _is_markdown_table_line(line: str) -> bool:
+            stripped = line.strip()
+            return len(stripped) >= 2 and stripped.startswith("|") and stripped.endswith("|")
+
+        def _is_markdown_table_separator(line: str) -> bool:
+            cells = _split_markdown_table_row(line)
+            if not cells:
+                return False
+            for cell in cells:
+                compact = cell.replace(" ", "")
+                if len(compact) < 3 or compact.strip(":-") != "":
+                    return False
+                if "-" not in compact:
+                    return False
+            return True
+
         # Fenced code blocks: ```lang\n...\n```
         result = re.sub(
             r"```(\w*)\n(.*?)```",
@@ -4032,6 +4056,36 @@ class MatrixAdapter(BasePlatformAdapter):
                 out_lines.append(f"<h{level}>{hdr.group(2).strip()}</h{level}>")
                 i += 1
                 continue
+
+            # GitHub-style pipe tables.
+            if (
+                i + 1 < len(lines)
+                and _is_markdown_table_line(line)
+                and _is_markdown_table_separator(lines[i + 1])
+            ):
+                header_cells = _split_markdown_table_row(line)
+                separator_cells = _split_markdown_table_row(lines[i + 1])
+                if len(header_cells) == len(separator_cells):
+                    body_rows: list[list[str]] = []
+                    i += 2
+                    while i < len(lines) and _is_markdown_table_line(lines[i]):
+                        row_cells = _split_markdown_table_row(lines[i])
+                        if len(row_cells) != len(header_cells):
+                            break
+                        body_rows.append(row_cells)
+                        i += 1
+
+                    thead = "".join(f"<th>{cell}</th>" for cell in header_cells)
+                    tbody = "".join(
+                        "<tr>{}</tr>".format(
+                            "".join(f"<td>{cell}</td>" for cell in row_cells)
+                        )
+                        for row_cells in body_rows
+                    )
+                    out_lines.append(
+                        f"<table><thead><tr>{thead}</tr></thead><tbody>{tbody}</tbody></table>"
+                    )
+                    continue
 
             # Blockquote
             if (
