@@ -38,6 +38,11 @@ _SECRET_SOURCES: dict[str, str] = {}
 # config re-parse, and the ASCII sanitization sweep still ran every time.
 _APPLIED_HOMES: set[str] = set()
 
+# Cross-process guard for Bitwarden status output.  Startup can spawn child
+# Python processes that each load this module and call load_hermes_dotenv();
+# module-level state does not cross that boundary, but os.environ does.
+_BWS_STATUS_PRINTED_ENV = "_HERMES_BWS_STATUS_PRINTED"
+
 
 def get_secret_source(env_var: str) -> str | None:
     """Return the label of the secret source that supplied ``env_var``, if any.
@@ -63,6 +68,7 @@ def reset_secret_source_cache() -> None:
     that want to refresh after a config change.
     """
     _APPLIED_HOMES.clear()
+    os.environ.pop(_BWS_STATUS_PRINTED_ENV, None)
 
 
 def format_secret_source_suffix(env_var: str) -> str:
@@ -305,6 +311,14 @@ def _apply_external_secret_sources(home_path: Path) -> None:
         # came from BSM rather than .env.
         for name in result.applied:
             _SECRET_SOURCES[name] = "bitwarden"
+
+    if not (result.applied or result.error or result.warnings):
+        return
+    if os.environ.get(_BWS_STATUS_PRINTED_ENV):
+        return
+    os.environ[_BWS_STATUS_PRINTED_ENV] = "1"
+
+    if result.applied:
         print(
             f"  Bitwarden Secrets Manager: applied {len(result.applied)} "
             f"secret{'s' if len(result.applied) != 1 else ''} "

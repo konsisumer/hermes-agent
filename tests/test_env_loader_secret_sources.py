@@ -7,6 +7,7 @@ don't see an unexplained "credentials ✓" line when their .env is empty.
 
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -119,6 +120,77 @@ def test_apply_external_secret_sources_noop_when_disabled(tmp_path, monkeypatch)
     env_loader._apply_external_secret_sources(tmp_path)
 
     assert env_loader.get_secret_source("ANTHROPIC_API_KEY") is None
+
+
+def test_apply_external_secret_sources_dedupes_across_subprocesses(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "secrets:\n"
+        "  bitwarden:\n"
+        "    enabled: true\n"
+        "    project_id: test-project\n"
+        "    access_token_env: BWS_ACCESS_TOKEN\n",
+        encoding="utf-8",
+    )
+
+    from agent.secret_sources.bitwarden import FetchResult
+
+    err_text = (
+        "secrets.bitwarden.enabled is true but BWS_ACCESS_TOKEN is "
+        "not set.  Run `hermes secrets bitwarden setup`."
+    )
+
+    def _fake_apply(**_kwargs):
+        return FetchResult(error=err_text)
+
+    import agent.secret_sources.bitwarden as bw_module
+
+    monkeypatch.setattr(bw_module, "apply_bitwarden_secrets", _fake_apply)
+    monkeypatch.setenv(env_loader._BWS_STATUS_PRINTED_ENV, "1")
+
+    env_loader._apply_external_secret_sources(tmp_path)
+
+    captured = capsys.readouterr()
+    assert "Bitwarden Secrets Manager" not in captured.err
+
+
+def test_apply_external_secret_sources_prints_warning_once_then_sets_marker(
+    tmp_path, monkeypatch, capsys
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "secrets:\n"
+        "  bitwarden:\n"
+        "    enabled: true\n"
+        "    project_id: test-project\n"
+        "    access_token_env: BWS_ACCESS_TOKEN\n",
+        encoding="utf-8",
+    )
+
+    from agent.secret_sources.bitwarden import FetchResult
+
+    err_text = (
+        "secrets.bitwarden.enabled is true but BWS_ACCESS_TOKEN is "
+        "not set.  Run `hermes secrets bitwarden setup`."
+    )
+
+    def _fake_apply(**_kwargs):
+        return FetchResult(error=err_text)
+
+    import agent.secret_sources.bitwarden as bw_module
+
+    monkeypatch.setattr(bw_module, "apply_bitwarden_secrets", _fake_apply)
+    monkeypatch.delenv(env_loader._BWS_STATUS_PRINTED_ENV, raising=False)
+
+    env_loader._apply_external_secret_sources(tmp_path)
+
+    captured = capsys.readouterr()
+    assert err_text in captured.err
+    assert os.environ.get(env_loader._BWS_STATUS_PRINTED_ENV) == "1"
 
 
 def test_apply_external_secret_sources_dedupes_within_process(tmp_path, monkeypatch):

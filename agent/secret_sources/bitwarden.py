@@ -618,6 +618,9 @@ def apply_bitwarden_secrets(
         return result
 
     access_token = os.environ.get(access_token_env, "").strip()
+    if not access_token and not project_id:
+        return result
+
     if not access_token:
         result.error = (
             f"secrets.bitwarden.enabled is true but {access_token_env} is "
