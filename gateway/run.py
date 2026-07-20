@@ -8269,14 +8269,26 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             dest_chat_type = "dm"
             dest_user_id = home_chat_id if is_telegram_private_chat else "system:handoff"
 
+        # Discord represents a thread as a channel in its own right. Its
+        # inbound adapter therefore uses the thread ID for both ``chat_id``
+        # and ``thread_id`` (with the parent retained separately). Match that
+        # shape here so the synthetic handoff and the first real thread reply
+        # resolve to one session key.
+        dest_chat_id = home_chat_id
+        dest_parent_chat_id = None
+        if platform == Platform.DISCORD and effective_thread_id:
+            dest_chat_id = effective_thread_id
+            dest_parent_chat_id = home_chat_id
+
         dest_source = SessionSource(
             platform=platform,
-            chat_id=home_chat_id,
+            chat_id=dest_chat_id,
             chat_name=home.name,
             chat_type=dest_chat_type,
             user_id=dest_user_id,
             user_name="Handoff",
             thread_id=effective_thread_id,
+            parent_chat_id=dest_parent_chat_id,
         )
 
         # Compute the gateway's session_key for that destination using the
