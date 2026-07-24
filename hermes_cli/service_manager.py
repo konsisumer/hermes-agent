@@ -802,7 +802,14 @@ class S6ServiceManager:
 
     # -- lifecycle ---------------------------------------------------------
 
-    def _run_svc(self, action_flag: str, action_label: str, name: str) -> None:
+    def _run_svc(
+        self,
+        action_flag: str,
+        action_label: str,
+        name: str,
+        *,
+        wait_for: str | None = None,
+    ) -> None:
         """Shared lifecycle dispatch for start / stop / restart.
 
         Translates the two failure modes operators care about into
@@ -820,7 +827,10 @@ class S6ServiceManager:
 
         ``action_flag`` is the ``s6-svc`` flag (``-u`` / ``-d`` /
         ``-t``); ``action_label`` is the human verb (``start`` /
-        ``stop`` / ``restart``) used in error messages.
+        ``stop`` / ``restart``) used in error messages. When
+        ``wait_for`` is set, ``s6-svc`` waits up to ten seconds for the
+        requested state transition instead of merely confirming that it
+        wrote to the control FIFO.
         """
         import subprocess
 
@@ -836,9 +846,17 @@ class S6ServiceManager:
             raise GatewayNotRegisteredError(profile)
 
         try:
+            command = [f"{_S6_BIN_DIR}/s6-svc", action_flag]
+            timeout = 5
+            if wait_for is not None:
+                command.extend([wait_for, "-T", "10000"])
+                # Allow the s6 timeout to elapse and report its actionable
+                # error instead of terminating it first in Python.
+                timeout = 15
+            command.append(str(service_dir))
             subprocess.run(
-                [f"{_S6_BIN_DIR}/s6-svc", action_flag, str(service_dir)],
-                check=True, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=5,
+                command,
+                check=True, capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=timeout,
             )
         except subprocess.CalledProcessError as exc:
             raise S6CommandError(
@@ -908,7 +926,10 @@ class S6ServiceManager:
                 write_planned_stop_marker(pid)
             except Exception:
                 pass
-        self._run_svc("-d", "stop", name)
+        # s6-svc otherwise returns as soon as it writes the control FIFO.
+        # Waiting for down makes a stuck child a visible failure instead of
+        # reporting that the gateway was stopped when it is still running.
+        self._run_svc("-d", "stop", name, wait_for="-wd")
         _write_gateway_desired_state(name, "stopped")
 
     def restart(self, name: str) -> None:
@@ -918,7 +939,10 @@ class S6ServiceManager:
             GatewayNotRegisteredError: no service directory for ``name``.
             S6CommandError: s6-svc exited non-zero for any other reason.
         """
-        self._run_svc("-t", "restart", name)
+        # A successful FIFO write only records restart intent. Wait until s6
+        # observes a down/up cycle so the caller cannot receive success while
+        # the original gateway process is still running.
+        self._run_svc("-t", "restart", name, wait_for="-wr")
         _write_gateway_desired_state(name, "running")
 
     def is_running(self, name: str) -> bool:

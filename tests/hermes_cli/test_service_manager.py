@@ -831,8 +831,12 @@ def test_s6_lifecycle_dispatches_to_s6_svc(
     mgr.stop("gateway-coder")
     mgr.restart("gateway-coder")
 
-    flags = [c[1] for c in fake_subprocess_run if c[0] == "s6-svc"]
-    assert flags == ["-u", "-d", "-t"]
+    commands = [c[1:-1] for c in fake_subprocess_run if c[0] == "s6-svc"]
+    assert commands == [
+        ["-u"],
+        ["-d", "-wd", "-T", "10000"],
+        ["-t", "-wr", "-T", "10000"],
+    ]
 
 
 def test_s6_lifecycle_persists_named_profile_desired_state(
@@ -973,6 +977,48 @@ def test_lifecycle_raises_s6_command_error_on_subprocess_failure(
     assert "Permission denied" in excinfo.value.stderr
     assert "Permission denied" in str(excinfo.value)
     assert "rc=111" in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("method_name", "wait_flag"),
+    [("stop", "-wd"), ("restart", "-wr")],
+)
+def test_s6_lifecycle_transition_timeout_is_an_error(
+    s6_scandir,
+    monkeypatch: pytest.MonkeyPatch,
+    method_name: str,
+    wait_flag: str,
+) -> None:
+    """A control-FIFO write alone must not be reported as a completed stop
+    or restart when s6 does not observe the requested transition."""
+    import subprocess as _sp
+
+    (s6_scandir / "gateway-coder").mkdir()
+    desired_states: list[tuple[str, str]] = []
+
+    def _timeout(cmd, **kw):
+        if wait_flag in cmd:
+            raise _sp.CalledProcessError(
+                returncode=1,
+                cmd=cmd,
+                stderr="s6-svlisten: fatal: timed out\n",
+            )
+        return _sp.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr("subprocess.run", _timeout)
+    monkeypatch.setattr(
+        "hermes_cli.service_manager._write_gateway_desired_state",
+        lambda name, state: desired_states.append((name, state)),
+    )
+
+    from hermes_cli.service_manager import S6CommandError
+
+    with pytest.raises(S6CommandError) as excinfo:
+        getattr(S6ServiceManager(scandir=s6_scandir), method_name)("gateway-coder")
+
+    assert excinfo.value.action == method_name
+    assert excinfo.value.returncode == 1
+    assert desired_states == []
 
 
 def test_s6_is_running_parses_svstat(
